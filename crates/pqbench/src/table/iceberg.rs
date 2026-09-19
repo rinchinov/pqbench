@@ -349,7 +349,7 @@ mod tests {
         std::fs::write(&metadata, "{}").unwrap();
         let metadata = metadata.canonicalize().unwrap();
         let root = local_table_root(
-            &Url::from_directory_path(table.path()).unwrap().to_string(),
+            Url::from_directory_path(table.path()).unwrap().as_ref(),
             &metadata,
         )
         .unwrap();
@@ -357,7 +357,7 @@ mod tests {
         let data = table.path().join("data.parquet");
         std::fs::write(&data, b"data").unwrap();
         assert_eq!(
-            local_data_file(&root, &Url::from_file_path(&data).unwrap().to_string()).unwrap(),
+            local_data_file(&root, Url::from_file_path(&data).unwrap().as_ref()).unwrap(),
             data.canonicalize().unwrap()
         );
         assert!(local_data_file(&root, "s3://bucket/data.parquet").is_err());

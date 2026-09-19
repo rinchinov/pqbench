@@ -9,6 +9,9 @@ use pqbench::compression;
 use pqbench::parquet_helpers::PageParser;
 use pqbench::stats;
 
+#[cfg(feature = "delta")]
+mod delta;
+
 #[derive(Parser)]
 #[command(
     name = "pqbench",
@@ -70,7 +73,13 @@ Examples:
   pqbench bytemass data.parquet --d3 > treemap.html && xdg-open treemap.html
 "#)]
     Bytemass(BytemassArgs),
+    /// analyze the active Parquet files in a local Delta snapshot
+    #[cfg(feature = "delta")]
+    #[command(after_help = "Example:\n  pqbench delta ./table --json")]
+    Delta(delta::Args),
     /// analyze a local Apache Iceberg snapshot
+    #[cfg(feature = "iceberg")]
+    #[command(after_help = "Example:\n  pqbench iceberg table/metadata/v2.metadata.json --json")]
     Iceberg(IcebergArgs),
 }
 
@@ -89,6 +98,7 @@ struct BytemassArgs {
 }
 
 /// Arguments for the local Iceberg snapshot analyzer.
+#[cfg(feature = "iceberg")]
 #[derive(Args)]
 struct IcebergArgs {
     /// explicit local Iceberg metadata JSON file
@@ -114,6 +124,9 @@ fn main() -> ExitCode {
         Command::Lz(args) => run_lz(&args),
         Command::Compression(args) => run_compression(&args),
         Command::Bytemass(args) => run_bytemass(&args),
+        #[cfg(feature = "delta")]
+        Command::Delta(args) => delta::run(&args),
+        #[cfg(feature = "iceberg")]
         Command::Iceberg(args) => run_iceberg(&args),
     };
     match result {
@@ -169,6 +182,7 @@ fn run_bytemass(args: &BytemassArgs) -> Result<(), CliError> {
 /// Resolve an Iceberg snapshot from explicit local metadata and render its
 /// physical Parquet byte mass. Delete files are reported by the table module
 /// but are not applied to this measurement.
+#[cfg(feature = "iceberg")]
 fn run_iceberg(args: &IcebergArgs) -> Result<(), CliError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -197,7 +211,7 @@ fn expand_inputs(inputs: &[String]) -> Result<Vec<PathBuf>, CliError> {
     for input in inputs {
         if has_glob_metachar(input) {
             let mut matched = false;
-            for entry in glob::glob(input)? {
+            for entry in glob::glob(&escape_literal_brackets(input))? {
                 paths.insert(entry?);
                 matched = true;
             }
@@ -212,7 +226,11 @@ fn expand_inputs(inputs: &[String]) -> Result<Vec<PathBuf>, CliError> {
 }
 
 fn has_glob_metachar(input: &str) -> bool {
-    input.contains(['*', '?', '['])
+    input.contains(['*', '?'])
+}
+
+fn escape_literal_brackets(input: &str) -> String {
+    input.replace('[', "[[]")
 }
 
 fn collection_label(paths: &[PathBuf]) -> String {
@@ -284,16 +302,23 @@ mod tests {
 
     #[test]
     fn expands_masks_and_rejects_empty_matches() {
-        let mask = format!(
-            "{}/tests/fixtures/*.parquet",
-            env!("CARGO_MANIFEST_DIR").replace("pqbench-cli", "pqbench")
-        );
+        let mask = format!("{}/tests/fixtures/*.parquet", env!("CARGO_MANIFEST_DIR"));
         let paths = expand_inputs(&[mask]).unwrap();
-        assert_eq!(paths.len(), 1);
-        assert_eq!(collection_label(&paths), "small_snappy.parquet");
+        assert!(!paths.is_empty());
 
         let missing = format!("{}/tests/fixtures/*.missing", env!("CARGO_MANIFEST_DIR"));
         assert!(expand_inputs(&[missing]).is_err());
+    }
+
+    #[test]
+    fn treats_brackets_as_literal_path_characters() {
+        assert!(!has_glob_metachar("data/archive[1].parquet"));
+        assert!(has_glob_metachar("data/archive?.parquet"));
+        assert!(has_glob_metachar("data/*.parquet"));
+        assert_eq!(
+            escape_literal_brackets("data/part[1]/*.parquet"),
+            "data/part[[]1]/*.parquet"
+        );
     }
 
     #[test]

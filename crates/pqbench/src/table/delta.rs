@@ -1,20 +1,22 @@
-//! Local Delta snapshot storage analysis.
+//! Delta snapshot storage analysis.
 //!
-//! delta-rs resolves the snapshot; only active data-file footers are inspected.
-//! Results measure physical storage, not decoded values or logical live rows.
+//! delta-rs resolves the snapshot and provides the object store; only active
+//! data-file footers are inspected. Results measure physical storage, not
+//! decoded values or logical live rows.
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use deltalake::{DeltaTable, DeltaTableBuilder};
 use futures::TryStreamExt;
+use object_store::path::Path as ObjectPath;
 use serde::Serialize;
 use url::Url;
 
 use crate::bytemass::{self, MassAccumulator, MassNode, MassSummary};
 use crate::parquet_helpers::{default_metadata_parser, MetadataParser};
 
-/// Errors resolving a local snapshot or measuring its active files.
+/// Errors resolving a Delta snapshot or measuring its active files.
 #[derive(Debug)]
 pub struct Error(String);
 
@@ -27,26 +29,39 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// A column's physical storage summed across all active data files.
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct ColumnReport {
+    /// Column path in schema form, e.g. `content` or `a.b`.
     pub path: String,
+    /// Total on-disk bytes across the snapshot's active files.
     pub compressed_bytes: u64,
+    /// Total encoded bytes before compression.
     pub uncompressed_bytes: u64,
+    /// Compression codecs present in the active files.
     pub codecs: BTreeSet<String>,
 }
 
-/// A complete measurement of one local snapshot. File bytes include Parquet
+/// A complete measurement of one Delta snapshot. File bytes include Parquet
 /// overhead, but exclude the Delta log, tombstones, and unrelated files.
-#[derive(Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
 pub struct TableReport {
+    /// Resolved Delta snapshot version.
     pub version: u64,
+    /// Number of active Parquet files.
     pub file_count: usize,
+    /// Total physical rows in the active files.
     pub physical_rows: u64,
+    /// Total size of the active Parquet files, including file overhead.
     pub file_bytes: u64,
+    /// Total compressed column-chunk bytes.
     pub compressed_column_bytes: u64,
+    /// Total uncompressed column-chunk bytes.
     pub uncompressed_column_bytes: u64,
     /// Partition values live in the log and need not occupy Parquet columns.
     pub partition_columns: Vec<String>,
+    /// Per-column physical storage totals.
     pub columns: Vec<ColumnReport>,
     /// Compressed column bytes per physical table row, for JSON/HTML consumers.
     tree: MassNode,
@@ -68,11 +83,40 @@ impl TableReport {
 /// paths, column mapping, deletion vectors, or unsupported Delta reader features.
 /// No partial report is returned on failure.
 pub async fn read_local(path: &Path, version: Option<u64>) -> Result<TableReport, Error> {
-    let root = local_root(path)?;
+    let path = path.to_owned();
+    let root = tokio::task::spawn_blocking(move || local_root(&path))
+        .await
+        .map_err(blocking_error)??;
     let table = load_local_table(&root, version).await?;
     let snapshot = snapshot_info(&table)?;
     let measured = measure_active_files(&table, &root).await?;
-    build_report(&root, snapshot, measured)
+    build_report(&local_label(&root), snapshot, measured)
+}
+
+/// Analyze the latest or requested version of a Delta table at a storage URI.
+///
+/// The URI is resolved by delta-rs, including its configured object-store
+/// integration. Active Parquet files are read through object metadata and
+/// bounded footer reads only.
+///
+/// # Errors
+/// Fails for invalid snapshots, missing or changed active objects, external
+/// data paths, column mapping, deletion vectors, or unsupported Delta reader
+/// features. No partial report is returned on failure.
+pub async fn read_remote(uri: &str, version: Option<u64>) -> Result<TableReport, Error> {
+    let url = Url::parse(uri).map_err(|e| Error(format!("invalid table URI {uri}: {e}")))?;
+    let table = load_table(url, version).await?;
+    read_table(&table).await
+}
+
+/// Analyze an already-loaded Delta table using its configured object store.
+///
+/// This is the provider-neutral entry point for applications that construct a
+/// Delta table with custom object-store configuration.
+pub async fn read_table(table: &DeltaTable) -> Result<TableReport, Error> {
+    let snapshot = snapshot_info(table)?;
+    let measured = measure_object_store_active_files(table).await?;
+    build_report(table.table_url().as_str(), snapshot, measured)
 }
 
 struct SnapshotInfo {
@@ -98,6 +142,10 @@ fn local_root(path: &Path) -> Result<PathBuf, Error> {
 async fn load_local_table(root: &Path, version: Option<u64>) -> Result<DeltaTable, Error> {
     let url = Url::from_directory_path(root)
         .map_err(|()| Error("cannot convert table path to a local file URL".into()))?;
+    load_table(url, version).await
+}
+
+async fn load_table(url: Url, version: Option<u64>) -> Result<DeltaTable, Error> {
     let mut builder = DeltaTableBuilder::from_url(url).map_err(delta_error)?;
     if let Some(version) = version {
         builder = builder.with_version(version);
@@ -125,7 +173,6 @@ fn snapshot_info(table: &DeltaTable) -> Result<SnapshotInfo, Error> {
 
 async fn measure_active_files(table: &DeltaTable, root: &Path) -> Result<MeasuredFiles, Error> {
     let mut files = table.get_active_add_actions_by_partitions(&[]);
-    let parser = default_metadata_parser();
     let mut mass = MassAccumulator::new();
     let mut file_bytes = 0;
     while let Some(file) = files.try_next().await.map_err(delta_error)? {
@@ -134,10 +181,48 @@ async fn measure_active_files(table: &DeltaTable, root: &Path) -> Result<Measure
                 "deletion vectors are not supported by local byte-mass analysis".into(),
             ));
         }
+        let relative = file.path().to_string();
+        let expected = u64::try_from(file.size())
+            .map_err(|_| Error(format!("invalid file size in log: {relative}")))?;
+        let task_root = root.to_owned();
+        let task_relative = relative.clone();
+        let (actual, file_mass) = tokio::task::spawn_blocking(move || {
+            measure_local_file(&task_root, &task_relative, expected)
+        })
+        .await
+        .map_err(blocking_error)??;
+        file_bytes = checked_sum(file_bytes, actual)?;
+        mass.add(file_mass).map_err(parquet_error)?;
+    }
+    Ok(MeasuredFiles {
+        file_bytes,
+        mass: mass.finish(),
+    })
+}
+
+async fn measure_object_store_active_files(table: &DeltaTable) -> Result<MeasuredFiles, Error> {
+    let store = table.object_store();
+    let mut files = table.get_active_add_actions_by_partitions(&[]);
+    let mut mass = MassAccumulator::new();
+    let mut file_bytes = 0;
+    while let Some(file) = files.try_next().await.map_err(delta_error)? {
+        if file.deletion_vector_descriptor().is_some() {
+            return Err(Error(
+                "deletion vectors are not supported by remote byte-mass analysis".into(),
+            ));
+        }
         let relative = file.path();
         let expected = u64::try_from(file.size())
             .map_err(|_| Error(format!("invalid file size in log: {relative}")))?;
-        let (actual, file_mass) = measure_local_file(root, relative.as_ref(), expected, &parser)?;
+        let location = object_store_file(relative.as_ref())?;
+        let (actual, file_mass) = bytemass::read_object_store_masses(store.as_ref(), &location)
+            .await
+            .map_err(|e| Error(format!("cannot read active file {relative}: {e}")))?;
+        if actual != expected {
+            return Err(Error(format!(
+                "active file size differs from log: {relative} (expected {expected}, found {actual})"
+            )));
+        }
         file_bytes = checked_sum(file_bytes, actual)?;
         mass.add(file_mass).map_err(parquet_error)?;
     }
@@ -151,7 +236,6 @@ fn measure_local_file(
     root: &Path,
     relative: &str,
     expected: u64,
-    parser: &impl MetadataParser,
 ) -> Result<(u64, crate::parquet_helpers::FileMass), Error> {
     let local = local_file(root, relative)?;
     let actual = std::fs::metadata(&local)
@@ -162,23 +246,19 @@ fn measure_local_file(
             "active file size differs from log: {relative} (expected {expected}, found {actual})"
         )));
     }
-    let mass = parser
+    let mass = default_metadata_parser()
         .read_masses(&local)
         .map_err(|e| Error(format!("cannot read active file {relative}: {e}")))?;
     Ok((actual, mass))
 }
 
 fn build_report(
-    root: &Path,
+    label: &str,
     snapshot: SnapshotInfo,
     measured: MeasuredFiles,
 ) -> Result<TableReport, Error> {
     let mass = measured.mass.file_mass();
     let mut tree = bytemass::aggregate(&bytemass::read(&mass));
-    let label = root
-        .file_name()
-        .unwrap_or(root.as_os_str())
-        .to_string_lossy();
     tree.label = format!(
         "{label} @ version {} (physical bytes/row)",
         snapshot.version
@@ -219,6 +299,10 @@ fn build_report(
 
 fn parquet_error(error: crate::parquet_helpers::Error) -> Error {
     Error(error.to_string())
+}
+
+fn blocking_error(error: tokio::task::JoinError) -> Error {
+    Error(format!("blocking file task failed: {error}"))
 }
 
 /// Serialize the snapshot report as pretty-printed JSON.
@@ -275,4 +359,24 @@ fn local_file(root: &Path, relative: &str) -> Result<PathBuf, Error> {
         )));
     }
     Ok(local)
+}
+
+fn object_store_file(relative: &str) -> Result<ObjectPath, Error> {
+    if relative.contains("://") {
+        return Err(Error(format!(
+            "only relative data paths inside the table are supported: {relative}"
+        )));
+    }
+    ObjectPath::parse(relative).map_err(|e| {
+        Error(format!(
+            "only relative data paths inside the table are supported: {relative} ({e})"
+        ))
+    })
+}
+
+fn local_label(root: &Path) -> String {
+    root.file_name()
+        .unwrap_or(root.as_os_str())
+        .to_string_lossy()
+        .into_owned()
 }
