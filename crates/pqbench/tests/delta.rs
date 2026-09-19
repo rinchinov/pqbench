@@ -2,8 +2,12 @@
 
 mod support;
 
+use std::sync::Arc;
+
+use object_store::memory::InMemory;
+use object_store::{path::Path as ObjectPath, ObjectStoreExt};
 use pqbench::parquet_helpers::{default_metadata_parser, MetadataParser};
-use pqbench::table::delta::read_local;
+use pqbench::table::delta::{read_local, read_table};
 use serde_json::json;
 use support::{metadata, remove, write_parquet, Fixture};
 
@@ -41,6 +45,42 @@ async fn resolves_versions_and_weights_columns_by_total_rows() {
     assert_eq!(report["physical_rows"], 14);
     assert_eq!(report["columns"][0]["compressed_bytes"], bytes);
     assert!(pqbench::table::delta::render(&latest).contains("physical rows: 14"));
+}
+
+#[tokio::test]
+async fn reads_loaded_object_store_table_without_downloading_parquet_files() {
+    let fixture = Fixture::new();
+    let store = Arc::new(InMemory::new());
+    for relative in [
+        "_delta_log/00000000000000000000.json",
+        "_delta_log/00000000000000000001.json",
+        "part=a/old file.parquet",
+        "part=b/kept.parquet",
+        "part=a/added.parquet",
+    ] {
+        let path = fixture.path().join(relative);
+        store
+            .put(
+                &ObjectPath::from(format!("table/{relative}")),
+                std::fs::read(path).unwrap().into(),
+            )
+            .await
+            .unwrap();
+    }
+    let url = url::Url::parse("memory:///table").unwrap();
+    let table = deltalake::DeltaTableBuilder::from_url(url.clone())
+        .unwrap()
+        .with_storage_backend(store, url)
+        .load()
+        .await
+        .unwrap();
+
+    let report = read_table(&table).await.unwrap();
+
+    assert_eq!(report.version, 1);
+    assert_eq!(report.file_count, 2);
+    assert_eq!(report.physical_rows, 14);
+    assert_eq!(report.partition_columns, ["part"]);
 }
 
 #[tokio::test]

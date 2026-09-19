@@ -1,20 +1,22 @@
-//! Local Delta snapshot storage analysis.
+//! Delta snapshot storage analysis.
 //!
-//! delta-rs resolves the snapshot; only active data-file footers are inspected.
-//! Results measure physical storage, not decoded values or logical live rows.
+//! delta-rs resolves the snapshot and provides the object store; only active
+//! data-file footers are inspected. Results measure physical storage, not
+//! decoded values or logical live rows.
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 
 use deltalake::{DeltaTable, DeltaTableBuilder};
 use futures::TryStreamExt;
+use object_store::path::Path as ObjectPath;
 use serde::Serialize;
 use url::Url;
 
 use crate::bytemass::{self, MassAccumulator, MassNode, MassSummary};
 use crate::parquet_helpers::{default_metadata_parser, MetadataParser};
 
-/// Errors resolving a local snapshot or measuring its active files.
+/// Errors resolving a Delta snapshot or measuring its active files.
 #[derive(Debug)]
 pub struct Error(String);
 
@@ -40,7 +42,7 @@ pub struct ColumnReport {
     pub codecs: BTreeSet<String>,
 }
 
-/// A complete measurement of one local snapshot. File bytes include Parquet
+/// A complete measurement of one Delta snapshot. File bytes include Parquet
 /// overhead, but exclude the Delta log, tombstones, and unrelated files.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
@@ -88,7 +90,33 @@ pub async fn read_local(path: &Path, version: Option<u64>) -> Result<TableReport
     let table = load_local_table(&root, version).await?;
     let snapshot = snapshot_info(&table)?;
     let measured = measure_active_files(&table, &root).await?;
-    build_report(&root, snapshot, measured)
+    build_report(&local_label(&root), snapshot, measured)
+}
+
+/// Analyze the latest or requested version of a Delta table at a storage URI.
+///
+/// The URI is resolved by delta-rs, including its configured object-store
+/// integration. Active Parquet files are read through object metadata and
+/// bounded footer reads only.
+///
+/// # Errors
+/// Fails for invalid snapshots, missing or changed active objects, external
+/// data paths, column mapping, deletion vectors, or unsupported Delta reader
+/// features. No partial report is returned on failure.
+pub async fn read_remote(uri: &str, version: Option<u64>) -> Result<TableReport, Error> {
+    let url = Url::parse(uri).map_err(|e| Error(format!("invalid table URI {uri}: {e}")))?;
+    let table = load_table(url, version).await?;
+    read_table(&table).await
+}
+
+/// Analyze an already-loaded Delta table using its configured object store.
+///
+/// This is the provider-neutral entry point for applications that construct a
+/// Delta table with custom object-store configuration.
+pub async fn read_table(table: &DeltaTable) -> Result<TableReport, Error> {
+    let snapshot = snapshot_info(table)?;
+    let measured = measure_object_store_active_files(table).await?;
+    build_report(table.table_url().as_str(), snapshot, measured)
 }
 
 struct SnapshotInfo {
@@ -114,6 +142,10 @@ fn local_root(path: &Path) -> Result<PathBuf, Error> {
 async fn load_local_table(root: &Path, version: Option<u64>) -> Result<DeltaTable, Error> {
     let url = Url::from_directory_path(root)
         .map_err(|()| Error("cannot convert table path to a local file URL".into()))?;
+    load_table(url, version).await
+}
+
+async fn load_table(url: Url, version: Option<u64>) -> Result<DeltaTable, Error> {
     let mut builder = DeltaTableBuilder::from_url(url).map_err(delta_error)?;
     if let Some(version) = version {
         builder = builder.with_version(version);
@@ -168,6 +200,38 @@ async fn measure_active_files(table: &DeltaTable, root: &Path) -> Result<Measure
     })
 }
 
+async fn measure_object_store_active_files(table: &DeltaTable) -> Result<MeasuredFiles, Error> {
+    let store = table.object_store();
+    let mut files = table.get_active_add_actions_by_partitions(&[]);
+    let mut mass = MassAccumulator::new();
+    let mut file_bytes = 0;
+    while let Some(file) = files.try_next().await.map_err(delta_error)? {
+        if file.deletion_vector_descriptor().is_some() {
+            return Err(Error(
+                "deletion vectors are not supported by remote byte-mass analysis".into(),
+            ));
+        }
+        let relative = file.path();
+        let expected = u64::try_from(file.size())
+            .map_err(|_| Error(format!("invalid file size in log: {relative}")))?;
+        let location = object_store_file(relative.as_ref())?;
+        let (actual, file_mass) = bytemass::read_object_store_masses(store.as_ref(), &location)
+            .await
+            .map_err(|e| Error(format!("cannot read active file {relative}: {e}")))?;
+        if actual != expected {
+            return Err(Error(format!(
+                "active file size differs from log: {relative} (expected {expected}, found {actual})"
+            )));
+        }
+        file_bytes = checked_sum(file_bytes, actual)?;
+        mass.add(file_mass).map_err(parquet_error)?;
+    }
+    Ok(MeasuredFiles {
+        file_bytes,
+        mass: mass.finish(),
+    })
+}
+
 fn measure_local_file(
     root: &Path,
     relative: &str,
@@ -189,16 +253,12 @@ fn measure_local_file(
 }
 
 fn build_report(
-    root: &Path,
+    label: &str,
     snapshot: SnapshotInfo,
     measured: MeasuredFiles,
 ) -> Result<TableReport, Error> {
     let mass = measured.mass.file_mass();
     let mut tree = bytemass::aggregate(&bytemass::read(&mass));
-    let label = root
-        .file_name()
-        .unwrap_or(root.as_os_str())
-        .to_string_lossy();
     tree.label = format!(
         "{label} @ version {} (physical bytes/row)",
         snapshot.version
@@ -299,4 +359,24 @@ fn local_file(root: &Path, relative: &str) -> Result<PathBuf, Error> {
         )));
     }
     Ok(local)
+}
+
+fn object_store_file(relative: &str) -> Result<ObjectPath, Error> {
+    if relative.contains("://") {
+        return Err(Error(format!(
+            "only relative data paths inside the table are supported: {relative}"
+        )));
+    }
+    ObjectPath::parse(relative).map_err(|e| {
+        Error(format!(
+            "only relative data paths inside the table are supported: {relative} ({e})"
+        ))
+    })
+}
+
+fn local_label(root: &Path) -> String {
+    root.file_name()
+        .unwrap_or(root.as_os_str())
+        .to_string_lossy()
+        .into_owned()
 }

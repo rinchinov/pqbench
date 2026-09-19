@@ -122,7 +122,7 @@ count. Shell-expanded masks work as multiple paths too.
 pqbench bytemass data.parquet --d3 > treemap.html && xdg-open treemap.html
 ```
 
-### Local Delta tables
+### Delta tables
 
 `pqbench::table::delta` analyzes the latest snapshot, or an explicit version,
 by reading only the active Parquet files' footer metadata. Enable the feature
@@ -139,3 +139,17 @@ compressed and uncompressed column bytes, codecs, and compressed bytes per row.
 It excludes the Delta log and tombstoned files. The current local implementation
 rejects deletion vectors, column mapping, external data paths, and active files
 whose size differs from the transaction log.
+
+For an S3 table, `read_remote` lets delta-rs construct its configured S3 object
+store. It reads Delta logs normally, then makes one `head` request and two
+ranged reads per active Parquet object: the 8-byte trailer and its serialized
+footer metadata. It never downloads Parquet pages or full data objects.
+
+```rust,no_run
+let report = pqbench::table::delta::read_remote("s3://bucket/table", None).await?;
+```
+
+`read_table` is the matching provider-neutral boundary for an already-loaded
+`deltalake::DeltaTable`, including one built with a custom object store. Remote
+Delta analysis is currently library-only: the CLI has no Delta URI command, and
+whole-table analysis does not yet expose partition filtering.

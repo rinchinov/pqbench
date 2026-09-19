@@ -102,6 +102,15 @@ pub fn default_metadata_parser() -> impl MetadataParser {
     crate::parquet_impl::ParquetRsParser
 }
 
+/// Read byte masses from a complete Parquet footer.
+///
+/// `footer` must contain the serialized Thrift metadata followed by the
+/// eight-byte Parquet footer trailer. This is useful for storage adapters that
+/// fetch only the end of a Parquet object.
+pub fn read_footer_masses(footer: &[u8]) -> Result<FileMass, Error> {
+    crate::parquet_impl::read_footer_masses(footer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,9 +14,15 @@ mod json;
 mod raw;
 mod text;
 
+#[cfg(feature = "delta")]
+mod object_store;
+
 pub use analytics::{aggregate, MassNode};
 pub use collection::{summarize_files, ColumnMassSummary, MassAccumulator, MassSummary};
 pub use d3::render_html;
 pub use json::tree;
 pub use raw::{read, FileRaw, RawColumn};
 pub use text::render;
+
+#[cfg(feature = "delta")]
+pub use object_store::read_object_store_masses;
