@@ -2543,6 +2543,7 @@ dependencies = [
  "clap",
  "glob",
  "pqbench",
+ "tokio",
 ]
 
 [[package]]
