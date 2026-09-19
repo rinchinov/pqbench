@@ -31,8 +31,8 @@ aggregates the results.
 cargo build --release
 ```
 
-The workspace requires Rust 1.91.1 or newer, matching the minimum required by
-delta-rs 0.32.4 when the optional Delta feature is enabled.
+The Delta feature requires Rust 1.91.1 or newer, matching delta-rs 0.32.4. The
+default `pqbench` workspace members retain their existing toolchain support.
 
 For development, prefer `cargo check` and normal debug builds. Release builds
 perform substantially more optimization and should be reserved for benchmarks
@@ -59,14 +59,7 @@ directory in each shell.
 
 The gate is `make check` (`cargo fmt --check`, `clippy -D warnings`, and the
 test suite). `make samples` fetches a few open parquet datasets into
-`local/samples/` for manual testing. Larger local benchmark data lives in the
-gitignored `local/`. The source code is `MIT OR Apache-2.0`.
-
-## Docker
-
-Build, run, and publish a container image of the release binary (no local Rust
-toolchain needed). See [docs/docker.md](docs/docker.md) for usage, the
-multi-arch workflow, and Docker Hub release setup.
+`data/samples/` for manual testing.
 
 ## Commands
 
@@ -122,15 +115,13 @@ count. Shell-expanded masks work as multiple paths too.
 pqbench bytemass data.parquet --d3 > treemap.html && xdg-open treemap.html
 ```
 
-### Delta tables
+### Local Delta tables
 
 `pqbench::table::delta` analyzes the latest snapshot, or an explicit version,
 by reading only the active Parquet files' footer metadata. Enable the feature
-when building, running, or testing:
+when building or testing:
 
 ```
-cargo run -p pqbench-cli --features delta -- delta ./path/to/table
-cargo run -p pqbench-cli --features delta -- delta ./path/to/table --version 3 --json
 cargo test -p pqbench --features delta
 ```
 
@@ -140,16 +131,20 @@ It excludes the Delta log and tombstoned files. The current local implementation
 rejects deletion vectors, column mapping, external data paths, and active files
 whose size differs from the transaction log.
 
-For an S3 table, `read_remote` lets delta-rs construct its configured S3 object
-store. It reads Delta logs normally, then makes one `head` request and two
-ranged reads per active Parquet object: the 8-byte trailer and its serialized
-footer metadata. It never downloads Parquet pages or full data objects.
+### Local DuckLake tables
 
-```rust,no_run
-let report = pqbench::table::delta::read_remote("s3://bucket/table", None).await?;
+`ducklakebench` reads a local DuckLake DuckDB catalog directly and analyzes the
+latest snapshot or an explicit snapshot of one schema/table. It resolves the
+catalog's hierarchical local data paths, checks active file sizes, and reads
+only Parquet footer metadata through `pqbench`:
+
+```
+ducklakebench ./catalog.ducklake --table events
+ducklakebench ./catalog.ducklake --schema analytics --table events --snapshot 42 --json
+ducklakebench ./catalog.ducklake --table events --d3 > treemap.html
 ```
 
-`read_table` is the matching provider-neutral boundary for an already-loaded
-`deltalake::DeltaTable`, including one built with a custom object store. Remote
-Delta analysis is currently library-only: the CLI has no Delta URI command, and
-whole-table analysis does not yet expose partition filtering.
+The report includes active data-file bytes and rows, per-column byte masses, and
+active delete-file paths, sizes, and deleted-row counts. Remote paths, inlined
+or encrypted data, non-Parquet data files, path escapes, and metadata/file size
+mismatches are rejected.

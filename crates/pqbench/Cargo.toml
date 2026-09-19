@@ -2,7 +2,6 @@
 name = "pqbench"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -11,14 +10,8 @@ description = "A benchmarking library for Parquet files (in-memory read/write th
 [features]
 default = []
 # Delta snapshot resolution requires Rust 1.91.1 or newer.
-delta = [
-    "dep:deltalake",
-    "dep:buoyant_kernel_derive",
-    "dep:futures",
-    "dep:object_store",
-    "dep:tokio",
-    "dep:url",
-]
+delta = ["dep:deltalake", "dep:buoyant_kernel_derive", "dep:futures", "dep:url"]
+ducklake = ["dep:duckdb"]
 
 [dependencies]
 snappy_src = "0.2.5"
@@ -29,17 +22,19 @@ parquet = { version = "59", default-features = false }
 bytes = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-deltalake = { version = "=0.32.4", default-features = false, features = ["s3"], optional = true }
+deltalake = { version = "=0.32.4", default-features = false, features = ["rustls"], optional = true }
 # delta-rs 0.32.4 was released against the 1.0 proc macros. Its transitive
 # semver range also accepts 1.2, whose renamed macros do not compile with
 # buoyant_kernel 0.22.2. Keep this direct pin until delta-rs updates the range.
 buoyant_kernel_derive = { version = "=1.0.0", optional = true }
 futures = { version = "0.3", optional = true }
-tokio = { version = "1", features = ["rt"], optional = true }
-object_store = { version = "=0.13.2", optional = true }
 url = { version = "2", optional = true }
+duckdb = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-async-trait = "0.1"
+
+[[test]]
+name = "delta"
+required-features = ["delta"]

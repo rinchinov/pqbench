@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/ducklakebench",
+    "crates/ducklakebench-cli",
     "crates/pqbench",
     "crates/pqbench-cli",
 ]
@@ -12,13 +14,14 @@ default-members = [
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.91.1"
 license = "MIT OR Apache-2.0"
 authors = ["pqbench contributors"]
 repository = "https://github.com/pqbench/pqbench"
 
 [workspace.dependencies]
+ducklakebench = { version = "0.0.1", path = "crates/ducklakebench" }
 pqbench = { version = "0.0.1", path = "crates/pqbench" }
+duckdb = { version = "=1.4.3", features = ["bundled"] }
 
 [profile.dev]
 opt-level = 0
