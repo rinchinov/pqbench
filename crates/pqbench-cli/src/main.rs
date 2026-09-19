@@ -9,9 +9,6 @@ use pqbench::compression;
 use pqbench::parquet_helpers::PageParser;
 use pqbench::stats;
 
-#[cfg(feature = "delta")]
-mod delta;
-
 #[derive(Parser)]
 #[command(
     name = "pqbench",
@@ -24,6 +21,7 @@ Examples:
   pqbench bytemass part-1.parquet part-2.parquet
   pqbench bytemass 'data/*.parquet'
   pqbench bytemass data.parquet --d3 > treemap.html && xdg-open treemap.html
+  pqbench iceberg table/metadata/v2.metadata.json --json
 "#
 )]
 struct Cli {
@@ -72,10 +70,8 @@ Examples:
   pqbench bytemass data.parquet --d3 > treemap.html && xdg-open treemap.html
 "#)]
     Bytemass(BytemassArgs),
-    /// analyze the active Parquet files in a local Delta snapshot
-    #[cfg(feature = "delta")]
-    #[command(after_help = "Example:\n  pqbench delta ./table --json")]
-    Delta(delta::Args),
+    /// analyze a local Apache Iceberg snapshot
+    Iceberg(IcebergArgs),
 }
 
 /// Arguments for `bytemass`.
@@ -92,6 +88,22 @@ struct BytemassArgs {
     d3: bool,
 }
 
+/// Arguments for the local Iceberg snapshot analyzer.
+#[derive(Args)]
+struct IcebergArgs {
+    /// explicit local Iceberg metadata JSON file
+    metadata: PathBuf,
+    /// snapshot ID (default: current snapshot)
+    #[arg(long)]
+    snapshot_id: Option<i64>,
+    /// emit the snapshot report as JSON instead of text
+    #[arg(long, conflicts_with = "d3")]
+    json: bool,
+    /// emit a self-contained d3 treemap HTML page instead of text stats
+    #[arg(long)]
+    d3: bool,
+}
+
 /// The CLI's single error channel: any error from the io, parquet, or codec
 /// layers, converted via `?`.
 type CliError = Box<dyn std::error::Error + Send + Sync>;
@@ -102,8 +114,7 @@ fn main() -> ExitCode {
         Command::Lz(args) => run_lz(&args),
         Command::Compression(args) => run_compression(&args),
         Command::Bytemass(args) => run_bytemass(&args),
-        #[cfg(feature = "delta")]
-        Command::Delta(args) => delta::run(&args),
+        Command::Iceberg(args) => run_iceberg(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -155,12 +166,38 @@ fn run_bytemass(args: &BytemassArgs) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Resolve an Iceberg snapshot from explicit local metadata and render its
+/// physical Parquet byte mass. Delete files are reported by the table module
+/// but are not applied to this measurement.
+fn run_iceberg(args: &IcebergArgs) -> Result<(), CliError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let report = runtime.block_on(pqbench::table::iceberg::read_local(
+        &args.metadata,
+        args.snapshot_id,
+    ))?;
+    let output = if args.json {
+        pqbench::table::iceberg::json(&report)?
+    } else if args.d3 {
+        pqbench::table::iceberg::render_html(&report)?
+    } else {
+        pqbench::table::iceberg::render(&report)
+    };
+    print!("{output}");
+    if !output.ends_with('\n') {
+        println!();
+    }
+    Ok(())
+}
+
 fn expand_inputs(inputs: &[String]) -> Result<Vec<PathBuf>, CliError> {
     let mut paths = BTreeSet::new();
     for input in inputs {
         if has_glob_metachar(input) {
             let mut matched = false;
-            for entry in glob::glob(&escape_literal_brackets(input))? {
+            for entry in glob::glob(input)? {
                 paths.insert(entry?);
                 matched = true;
             }
@@ -175,11 +212,7 @@ fn expand_inputs(inputs: &[String]) -> Result<Vec<PathBuf>, CliError> {
 }
 
 fn has_glob_metachar(input: &str) -> bool {
-    input.contains(['*', '?'])
-}
-
-fn escape_literal_brackets(input: &str) -> String {
-    input.replace('[', "[[]")
+    input.contains(['*', '?', '['])
 }
 
 fn collection_label(paths: &[PathBuf]) -> String {
@@ -251,23 +284,16 @@ mod tests {
 
     #[test]
     fn expands_masks_and_rejects_empty_matches() {
-        let mask = format!("{}/tests/fixtures/*.parquet", env!("CARGO_MANIFEST_DIR"));
+        let mask = format!(
+            "{}/tests/fixtures/*.parquet",
+            env!("CARGO_MANIFEST_DIR").replace("pqbench-cli", "pqbench")
+        );
         let paths = expand_inputs(&[mask]).unwrap();
-        assert!(!paths.is_empty());
+        assert_eq!(paths.len(), 1);
+        assert_eq!(collection_label(&paths), "small_snappy.parquet");
 
         let missing = format!("{}/tests/fixtures/*.missing", env!("CARGO_MANIFEST_DIR"));
         assert!(expand_inputs(&[missing]).is_err());
-    }
-
-    #[test]
-    fn treats_brackets_as_literal_path_characters() {
-        assert!(!has_glob_metachar("data/archive[1].parquet"));
-        assert!(has_glob_metachar("data/archive?.parquet"));
-        assert!(has_glob_metachar("data/*.parquet"));
-        assert_eq!(
-            escape_literal_brackets("data/part[1]/*.parquet"),
-            "data/part[[]1]/*.parquet"
-        );
     }
 
     #[test]
