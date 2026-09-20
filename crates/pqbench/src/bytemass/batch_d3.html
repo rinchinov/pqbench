@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pqbench collection</title>
+<style>
+body { font-family: sans-serif; margin: 0; color: #1c2a3a; background: #f3f1eb; }
+header { padding: 12px 16px 0; }
+h1 { margin: 0 0 8px; font-size: 26px; font-weight: normal; text-align: center; }
+header p { margin: 0 0 8px; }
+nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 16px; }
+button { cursor: pointer; padding: 4px 8px; border: 1px solid #b7c0c8; border-radius: 4px; background: #fffaf3; color: inherit; }
+button:hover { background: #e8eef4; }
+.split { display: flex; min-height: 70vh; }
+.list { flex: 0 0 38%; padding: 0 16px 16px; overflow: auto; }
+.viz { flex: 1; min-width: 0; }
+svg { width: 100%; height: 70vh; display: block; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px; border-bottom: 1px solid #d5d1cb; overflow-wrap: anywhere; }
+.error { color: #9c2929; }
+.bar { display: inline-block; height: 8px; background: #2a6f97; vertical-align: middle; margin-right: 8px; }
+.cell { stroke: #f3f1eb; stroke-width: 1px; cursor: pointer; }
+.group { fill: #dce6ef; stroke: #7d8b99; stroke-width: 1px; cursor: pointer; }
+.cell:hover, .group:hover { stroke: #1c2a3a; stroke-width: 1.6px; }
+.label { fill: #1c2a3a; font-size: 12px; pointer-events: none; }
+.group-label { fill: #1c2a3a; font-size: 13px; font-weight: 600; pointer-events: none; }
+@media (max-width: 900px) { .split { flex-direction: column; } .list { flex: none; } svg { height: 50vh; } }
+</style>
+</head>
+<body>
+<header>
+<h1>Byte mass by lake layer</h1>
+<p>__COVERAGE__</p>
+<nav id="crumbs" aria-label="Layers"></nav>
+<p id="detail"></p>
+</header>
+<div class="split">
+<section class="list" aria-label="Layer list">
+<table>
+<thead><tr><th>Name</th><th>Layer</th><th>Compressed bytes</th><th>Status</th></tr></thead>
+<tbody></tbody>
+</table>
+</section>
+<section class="viz" aria-label="Byte-mass treemap">
+<svg viewBox="0 0 1200 900" role="group"></svg>
+</section>
+</div>
+<script type="module">
+import {hierarchy, treemap} from "https://cdn.jsdelivr.net/npm/d3-hierarchy@3/+esm";
+import {scaleOrdinal, scaleSequential} from "https://cdn.jsdelivr.net/npm/d3-scale@4/+esm";
+import {interpolateYlGnBu, schemeTableau10} from "https://cdn.jsdelivr.net/npm/d3-scale-chromatic@3/+esm";
+import {select} from "https://cdn.jsdelivr.net/npm/d3-selection@3/+esm";
+const groupColor = scaleOrdinal(schemeTableau10);
+const tree = __TREE__;
+const format = n => new Intl.NumberFormat(undefined, {maximumFractionDigits: 2}).format(n);
+function tableBytes(table) {
+  return table.analysis ? table.analysis.compressed_column_bytes : 0;
+}
+function walk(node, fn) {
+  for (const table of node.tables || []) fn(table);
+  for (const schema of node.schemas || []) walk(schema, fn);
+  for (const catalog of node.catalogs || []) walk(catalog, fn);
+}
+function groupBytes(node) {
+  let total = 0;
+  walk(node, table => { total += tableBytes(table); });
+  return total;
+}
+function children(node) {
+  return [
+    ...(node.catalogs || []).map(n => ({kind: 'catalog', node: n})),
+    ...(node.schemas || []).map(n => ({kind: 'schema', node: n})),
+    ...(node.tables || []).map(n => ({kind: 'table', node: n})),
+  ];
+}
+function columns(table) {
+  return (table.analysis && table.analysis.columns || []).map(column => ({
+    kind: 'column',
+    node: {name: column.path, bytes: column.compressed_bytes},
+  }));
+}
+function rowBytes(row) {
+  if (row.kind === 'column') return row.node.bytes;
+  if (row.kind === 'table') return tableBytes(row.node);
+  return groupBytes(row.node);
+}
+function status(row) {
+  if (row.kind === 'table') return row.node.error || row.node.status || '';
+  return '';
+}
+function label(row, parentTable) {
+  const bytes = rowBytes(row);
+  if (row.kind === 'column' && parentTable?.analysis?.physical_rows) {
+    return [row.node.name, `${format(bytes / parentTable.analysis.physical_rows)} bpr`];
+  }
+  return [row.node.name, format(bytes)];
+}
+function tableOf(node, parentTable) {
+  if (parentTable) return parentTable;
+  const owner = node.parent && node.parent.data && node.parent.data.row;
+  return owner && owner.kind === 'table' ? owner.node : null;
+}
+function nextRows(row) {
+  if (row.kind === 'column') return [];
+  if (row.kind === 'table') return columns(row.node);
+  return children(row.node);
+}
+function drill(path, node) {
+  const row = node.data.row;
+  if (!row || row.kind === 'column') return;
+  if (node.depth === 2) show(path.concat([node.parent.data.row, row]));
+  else show(path.concat([row]));
+}
+function drawMap(rows, path, parentTable) {
+  const width = 1200, height = 900;
+  const svg = select('svg');
+  svg.selectAll('*').remove();
+  const cells = rows.filter(row => rowBytes(row) > 0);
+  if (!cells.length) return;
+  const root = hierarchy({
+    children: cells.map(row => {
+      const nested = nextRows(row).filter(child => rowBytes(child) > 0);
+      return nested.length
+        ? {row, children: nested.map(child => ({row: child, value: rowBytes(child)}))}
+        : {row, value: rowBytes(row)};
+    }),
+  }).sum(d => d.value || 0);
+  treemap().size([width, height]).paddingOuter(3).paddingTop(d => d.children ? 22 : 3)
+    .paddingInner(2).round(true)(root);
+  const values = root.leaves().map(d => d.value);
+  const leafColor = scaleSequential(interpolateYlGnBu)
+    .domain([Math.min(...values, 0), Math.max(...values, 1)]);
+  const nodes = svg.selectAll('g').data(root.descendants().filter(d => d.depth > 0)).join('g')
+    .attr('transform', d => `translate(${d.x0},${d.y0})`)
+    .attr('tabindex', d => d.data.row.kind === 'column' ? null : 0)
+    .attr('role', d => d.data.row.kind === 'column' ? null : 'button')
+    .attr('aria-label', d => label(d.data.row, tableOf(d, parentTable)).join(' '));
+  nodes.append('rect')
+    .attr('class', d => d.children ? 'group' : 'cell')
+    .attr('width', d => Math.max(0, d.x1 - d.x0))
+    .attr('height', d => Math.max(0, d.y1 - d.y0))
+    .attr('fill', d => {
+      if (d.children) return null;
+      if (d.data.row.kind === 'column') return leafColor(d.value);
+      return groupColor(d.data.row.node.name);
+    });
+  nodes.append('title').text(d => {
+    const parts = label(d.data.row, tableOf(d, parentTable));
+    if (d.parent && d.parent.data.row) parts.unshift(d.parent.data.row.node.name);
+    return parts.join(' · ');
+  });
+  nodes.filter(d => d.children && (d.x1 - d.x0) > 48)
+    .append('text').attr('class', 'group-label').attr('x', 6).attr('y', 15)
+    .text(d => d.data.row.node.name);
+  nodes.filter(d => !d.children && (d.x1 - d.x0) > 36 && (d.y1 - d.y0) > 28)
+    .append('text').selectAll('tspan')
+    .data(d => label(d.data.row, tableOf(d, parentTable)))
+    .join('tspan')
+    .attr('class', 'label')
+    .attr('x', 4)
+    .attr('y', (d, i) => 15 + i * 14)
+    .text(d => d);
+  nodes.on('click', (_, d) => drill(path, d));
+  nodes.on('keydown', (event, d) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      drill(path, d);
+    }
+  });
+}
+function show(path) {
+  const here = path[path.length - 1];
+  const crumbs = document.getElementById('crumbs');
+  crumbs.replaceChildren();
+  for (const [index, step] of path.entries()) {
+    const button = document.createElement('button');
+    button.textContent = step.node.lake || step.node.name || 'Collection';
+    button.addEventListener('click', () => show(path.slice(0, index + 1)));
+    crumbs.appendChild(button);
+  }
+  const rows = here.kind === 'table' ? columns(here.node) : children(here.node);
+  const widest = Math.max(0, ...rows.map(rowBytes));
+  const detail = document.getElementById('detail');
+  detail.textContent = here.kind === 'table' && here.node.error
+    ? here.node.error
+    : `${format(rowBytes(here))} compressed column bytes`;
+  const body = document.querySelector('tbody');
+  body.replaceChildren();
+  for (const row of rows) {
+    const tr = document.createElement('tr');
+    const name = document.createElement('td');
+    if (row.kind === 'column') {
+      name.textContent = row.node.name;
+    } else {
+      const button = document.createElement('button');
+      button.textContent = row.node.name;
+      button.addEventListener('click', () => show(path.concat([row])));
+      name.appendChild(button);
+    }
+    const layer = document.createElement('td');
+    layer.textContent = row.kind;
+    const bytes = document.createElement('td');
+    const bar = document.createElement('span');
+    bar.className = 'bar';
+    bar.style.width = widest ? `${Math.max(2, 80 * rowBytes(row) / widest)}px` : '0';
+    bytes.appendChild(bar);
+    bytes.appendChild(document.createTextNode(format(rowBytes(row))));
+    const state = document.createElement('td');
+    state.textContent = status(row);
+    if (row.node.error) state.className = 'error';
+    tr.append(name, layer, bytes, state);
+    body.appendChild(tr);
+  }
+  drawMap(rows, path, here.kind === 'table' ? here.node : null);
+}
+show([{kind: 'collection', node: tree}]);
+</script>
+</body>
+</html>

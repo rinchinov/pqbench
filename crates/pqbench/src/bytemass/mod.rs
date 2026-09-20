@@ -14,6 +14,11 @@
 mod aggregate;
 mod analytics;
 mod api;
+pub mod batch;
+mod batch_d3;
+mod batch_reports;
+mod reader;
+pub use reader::FooterReader;
 mod collection;
 mod d3;
 mod json;

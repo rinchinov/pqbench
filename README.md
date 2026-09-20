@@ -67,6 +67,20 @@ feature; a URI whose backend is not compiled in fails at runtime with the
 missing feature named. The library entry point (`bytemass::bytemass`) is
 always available and never feature-gated.
 
+### Nested table collections
+
+Analyze tables concurrently while preserving their lake/catalog/schema hierarchy:
+
+```bash
+producer | pqbench bytemass --collection - --table-jobs 4 --file-jobs 32 \
+  --d3 --output-dir reports
+```
+
+Each table carries the existing source document. `--json` emits the same tree
+with a result on each table; `--d3` embeds that tree in one HTML page: a layer list plus a clickable
+treemap that drills lake layers. See [collections](docs/collections.md) for the input format
+and a Databricks CLI → `jq` → pqbench example.
+
 ### --source -
 
 A producer that resolves names in a catalog hands pqbench a versioned document

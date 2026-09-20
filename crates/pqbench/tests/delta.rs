@@ -7,6 +7,42 @@ use pqbench::table::delta::{delta, render_json, render_text, DeltaRequest};
 use serde_json::json;
 use support::{metadata, remove, write_parquet, Fixture};
 
+#[tokio::test]
+async fn collection_resolves_each_snapshot_and_matches_existing_delta_report() {
+    use pqbench::bytemass::batch;
+    use std::num::NonZeroUsize;
+
+    let fixture = Fixture::new();
+    let uri = url::Url::from_directory_path(fixture.path()).unwrap();
+    let document = json!({"kind":"pqbench.collection", "version":1, "tables":[
+        {"name":"previous", "format":"delta", "snapshot_version":0,
+         "source":{"kind":"pqbench.remote-source", "version":1, "inputs":[uri.as_str()]}},
+        {"name":"latest", "format":"delta",
+         "source":{"kind":"pqbench.remote-source", "version":1, "inputs":[uri.as_str()]}}
+    ]});
+    let report = batch::analyze(
+        serde_json::from_value(document).unwrap(),
+        NonZeroUsize::new(2).unwrap(),
+        NonZeroUsize::new(4).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.failed_tables(), 0);
+    let result = serde_json::to_value(report).unwrap();
+    assert_eq!(result["tables"][0]["analysis"]["version"], 0);
+    assert_eq!(result["tables"][0]["analysis"]["physical_rows"], 7);
+    assert_eq!(result["tables"][1]["analysis"]["version"], 1);
+    let expected = delta(&request(uri.as_str(), None)).await.unwrap();
+    assert_eq!(
+        result["tables"][1]["analysis"]["file_bytes"],
+        expected.file_bytes
+    );
+    assert_eq!(
+        result["tables"][1]["analysis"]["columns"],
+        serde_json::to_value(expected.columns).unwrap()
+    );
+}
+
 fn request(table: impl Into<String>, version: Option<u64>) -> DeltaRequest {
     DeltaRequest {
         table: table.into(),

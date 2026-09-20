@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 
 mod bench;
 mod bytemass;
+mod collection;
 mod compression;
 mod lz;
 mod source;

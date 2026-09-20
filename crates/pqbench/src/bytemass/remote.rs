@@ -25,7 +25,7 @@ pub(super) async fn read_remote(uri: &str) -> Result<(u64, FileMass), Error> {
 ///
 /// # Errors
 /// As [`read_remote`].
-async fn read_remote_with_options(
+pub(super) async fn read_remote_with_options(
     uri: &str,
     options: impl IntoIterator<Item = (String, String)>,
 ) -> Result<(u64, FileMass), Error> {

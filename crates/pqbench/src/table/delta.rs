@@ -8,11 +8,11 @@
 //! delta-rs resolves the snapshot; only active data-file footers are inspected.
 //! Results measure physical storage, not decoded values or logical live rows.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 use deltalake::{DeltaTable, DeltaTableBuilder};
-use futures::TryStreamExt;
+use futures::{stream, StreamExt, TryStreamExt};
 use serde::Serialize;
 use url::Url;
 
@@ -107,6 +107,76 @@ pub async fn delta(request: &DeltaRequest) -> Result<TableReport, Error> {
     } else {
         read_local(Path::new(&request.table), request.version).await
     }
+}
+
+/// Analyze a snapshot with per-table storage options and a shared footer limit.
+/// Options apply to both the transaction log and active Parquet objects.
+///
+/// # Errors
+/// As [`delta`]. Options are not included in the returned report.
+pub async fn delta_with_options(
+    request: &DeltaRequest,
+    options: &BTreeMap<String, String>,
+    reader: &bytemass::FooterReader,
+) -> Result<TableReport, Error> {
+    let url = if request.table.contains("://") {
+        let url = Url::parse(&request.table).map_err(|e| Error(e.to_string()))?;
+        if url.scheme() == "file" {
+            let path = url
+                .to_file_path()
+                .map_err(|()| Error("invalid local table URI".into()))?;
+            Url::from_directory_path(local_root(&path)?)
+                .map_err(|()| Error("invalid table path".into()))?
+        } else {
+            url
+        }
+    } else {
+        Url::from_directory_path(local_root(Path::new(&request.table))?)
+            .map_err(|()| Error("invalid table path".into()))?
+    };
+    let mut builder = DeltaTableBuilder::from_url(url)
+        .map_err(delta_error)?
+        .with_storage_options(options.clone().into_iter().collect());
+    if let Some(version) = request.version {
+        builder = builder.with_version(version);
+    }
+    let table = builder.load().await.map_err(delta_error)?;
+    let snapshot = snapshot_info(&table)?;
+    let active = active_files(&table).await?;
+    let mut reads = stream::iter(active.iter().map(|file| async move {
+        let (size, mass) = reader
+            .read(&file.input, options)
+            .await
+            .map_err(|e| Error(format!("cannot read active file {}: {e}", file.relative)))?;
+        if size != file.expected {
+            return Err(Error(format!(
+                "active file size differs from log: {} (expected {}, found {size})",
+                file.relative, file.expected
+            )));
+        }
+        let rows = mass
+            .columns
+            .into_iter()
+            .map(|column| MassRow {
+                file: file.input.clone(),
+                size,
+                num_rows: mass.num_rows,
+                column: column.path,
+                compressed_bytes: column.bytes,
+                uncompressed_bytes: column.uncompressed_bytes,
+                codec: column.codec,
+            })
+            .collect::<Vec<_>>();
+        Ok((size, rows))
+    }))
+    .buffer_unordered(reader.concurrency());
+    let mut rows = Vec::new();
+    let mut file_bytes = 0;
+    while let Some((size, file_rows)) = reads.try_next().await? {
+        file_bytes = checked_sum(file_bytes, size)?;
+        rows.extend(file_rows);
+    }
+    build_report(snapshot, file_bytes, rows)
 }
 
 /// Analyze the latest or requested version of a local Delta table.

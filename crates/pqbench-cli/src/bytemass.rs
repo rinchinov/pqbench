@@ -1,5 +1,6 @@
 use clap::Args;
 use pqbench::bytemass;
+use std::num::NonZeroUsize;
 
 use crate::source::read_source_inputs;
 use crate::CliError;
@@ -8,22 +9,37 @@ use crate::CliError;
 #[derive(Args)]
 pub(crate) struct BytemassArgs {
     /// parquet paths or glob masks; quote masks to prevent shell expansion
-    #[arg(required_unless_present = "source", conflicts_with = "source")]
+    #[arg(required_unless_present_any = ["source", "collection"], conflicts_with_all = ["source", "collection"])]
     inputs: Vec<String>,
     /// read the inputs from a source document on standard input (`-` only)
     #[arg(long, value_name = "-")]
     source: Option<String>,
+    /// nested pqbench.collection JSON from a file or standard input (`-`)
+    #[arg(long, conflicts_with = "source")]
+    collection: Option<String>,
+    /// maximum active tables in a collection
+    #[arg(long, default_value = "4", requires = "collection")]
+    pub(crate) table_jobs: NonZeroUsize,
+    /// maximum simultaneous footer reads shared by all tables
+    #[arg(long, default_value = "32", requires = "collection")]
+    pub(crate) file_jobs: NonZeroUsize,
+    /// save a report at each hierarchy level in a new directory (requires --json or --d3)
+    #[arg(long, requires = "collection")]
+    pub(crate) output_dir: Option<std::path::PathBuf>,
     /// emit per-column byte masses as JSON instead of text stats
     #[arg(long = "json", conflicts_with = "d3")]
-    json: bool,
+    pub(crate) json: bool,
     /// emit a self-contained d3 treemap HTML (open in a browser) instead of text stats
     #[arg(long = "d3")]
-    d3: bool,
+    pub(crate) d3: bool,
 }
 
 /// Build the typed request, measure, and render the CLI's chosen format. The
 /// CLI owns the format decision; the library just returns the table.
 pub(crate) fn run(args: &BytemassArgs) -> Result<(), CliError> {
+    if let Some(input) = &args.collection {
+        return crate::collection::run(input, args);
+    }
     let request = bytemass::BytemassRequest {
         inputs: match &args.source {
             Some(source) => read_source_inputs(source)?,
