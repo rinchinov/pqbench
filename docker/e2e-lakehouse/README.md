@@ -1,10 +1,11 @@
 # Catalogs → pqbench
 
-Three catalogs share one S3-compatible object store. Each names the live Parquet
-objects; pqbench measures their footers through `--source -`. No Spark, no
-Postgres, no UI: [Unity Catalog OSS](https://docs.unitycatalog.io/docker_compose/),
-an [Iceberg REST fixture](https://iceberg.apache.org/spark-quickstart/), DuckLake
-metadata in SQLite, and [rustfs](https://docs.rustfs.com/en/installation/container/docker/).
+Three catalogs share one S3-compatible object store. Each names a table;
+pqbench resolves that table's live Parquet files and measures their footers
+through `--source -`. No Spark, no Postgres, no UI: [Unity Catalog
+OSS](https://docs.unitycatalog.io/docker_compose/), an [Iceberg REST
+fixture](https://iceberg.apache.org/spark-quickstart/), DuckLake metadata in
+SQLite, and [rustfs](https://docs.rustfs.com/en/installation/container/docker/).
 Unity's official image is a large download (about 2.4 GB).
 
 | Catalog | Table | Objects |
@@ -32,7 +33,7 @@ That reaches a stand you can query, in steps you can also run alone:
 
 | Target | What it does |
 | --- | --- |
-| `make lakehouse-up` | builds pqbench with `--features delta-s3`, starts rustfs, mints the session credential Unity will vend, waits for Unity and Iceberg REST to answer |
+| `make lakehouse-up` | builds pqbench with `--features delta-s3,iceberg-s3,ducklake-s3`, starts rustfs, mints the session credential Unity will vend, waits for Unity and Iceberg REST to answer |
 | `make lakehouse-seed-s3` | uploads [`table/`](table) to `s3://lakehouse/unity/events` |
 | `make lakehouse-seed-unity` | registers `pqbench.demo.events` as an external Delta table |
 | `make lakehouse-seed-iceberg` | uploads [`iceberg/`](iceberg) and registers `demo.events` over REST |
@@ -109,8 +110,10 @@ environment; a producer whose catalog vends expiring credentials puts them in
 `AWS_*` names are accepted there, and anything else is a loud error. Both
 endpoint names appear because pqbench's object store reads `AWS_ENDPOINT` while
 delta-rs reads `AWS_ENDPOINT_URL`; against real AWS neither is needed. `inputs`
-is one Delta table for `pqbench delta`, and `pqbench bytemass --source -` takes
-the same document naming Parquet objects directly.
+is one table for `pqbench delta`, one metadata JSON location for
+`pqbench iceberg`, or one SQLite catalog for `pqbench ducklake`.
+`pqbench bytemass --source -` takes the same document naming Parquet objects
+directly.
 
 One caveat before copying this shape onto real infrastructure. Unity Catalog OSS
 mints vended credentials by calling AWS STS `AssumeRole` and cannot send that
@@ -126,11 +129,9 @@ role and return a policy-scoped session.
 
 ## Iceberg REST
 
-The fixture does **not** vend credentials. `loadTable` returns table metadata;
-the current snapshot's data files are committed next to that metadata in
-[`iceberg/active-files`](iceberg/active-files) (produced from `scan().plan_files()`
-when the fixture was written, not from `s3 ls`). Storage keys stay in `env` as
-the stand's dummy values.
+The fixture does **not** vend credentials. `loadTable` returns the metadata
+JSON location; `pqbench iceberg` reads that snapshot and measures the active
+data files. Storage keys stay in `env` as the stand's dummy values.
 
 ```bash
 ICEBERG=http://localhost:8181
@@ -149,16 +150,23 @@ curl -s $ICEBERG/v1/namespaces/demo/tables/events |
 
 ```bash
 S3=http://localhost:9000
-jq -n --rawfile files docker/e2e-lakehouse/iceberg/active-files --arg s3 "$S3" \
-  '{kind: "pqbench.remote-source", version: 1,
-    inputs: ($files | split("\n") | map(select(length > 0))),
+curl -s $ICEBERG/v1/namespaces/demo/tables/events |
+  jq -c --arg s3 "$S3" '{kind: "pqbench.remote-source", version: 1,
+    inputs: [."metadata-location"],
     env: {AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test",
       AWS_REGION: "us-east-1", AWS_ENDPOINT: $s3, AWS_ALLOW_HTTP: "true",
       AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false"}}' |
-  target/debug/pqbench bytemass --source -
+  target/debug/pqbench iceberg --source -
 ```
 
 ```text
+iceberg snapshot: 3268038499157964613
+active data files: 1
+physical rows: 3
+active parquet bytes: 962
+compressed column bytes: 231
+uncompressed column bytes: 227
+delete files: 0 (position: 0, equality: 0, not applied)
 bytemass: 00000-0-672adf8a-08b9-40a5-bd0d-2f2dcbfb965c.parquet
 column                              bytes/row
 id                                      41.67
@@ -168,35 +176,38 @@ total                                   77.00
 ```
 
 To grow the table, add Parquet files and a new snapshot with a real Iceberg
-writer, commit the updated `metadata/` plus `active-files`, and re-run
-`make lakehouse-seed-iceberg`. pqbench still just measures the named objects.
+writer, commit the updated `metadata/`, and re-run `make lakehouse-seed-iceberg`.
 
 ## DuckLake
 
 DuckLake has no server and does not vend credentials. The catalog is a committed
-SQLite file ([`ducklake/metadata.sqlite`](ducklake/metadata.sqlite)); active
-files are rows in `ducklake_data_file` with `end_snapshot` unset. Tables with
-delete files are rejected — pqbench measures physical files, not rows after
-deletes. `DATA_INLINING_ROW_LIMIT` was 0 when the fixture was written, so the
-three rows are Parquet on S3, not inlined in SQLite.
+SQLite file ([`ducklake/metadata.sqlite`](ducklake/metadata.sqlite));
+`pqbench ducklake` reads active files from that catalog. Delete files are
+counted and not applied. `DATA_INLINING_ROW_LIMIT` was 0 when the fixture was
+written, so the three rows are Parquet on S3, not inlined in SQLite.
 
 ```bash
 S3=http://localhost:9000
 
-docker compose -f docker/e2e-lakehouse/compose.yaml run --rm -T sqlite \
-    -json /metadata.sqlite \
-    "SELECT CASE path_is_relative WHEN 1
-       THEN 's3://lakehouse/ducklake/main/events/' || path ELSE path END AS uri
-     FROM ducklake_data_file WHERE end_snapshot IS NULL" |
-  jq -c --arg s3 "$S3" '{kind: "pqbench.remote-source", version: 1,
-    inputs: map(.uri),
+jq -n --arg catalog docker/e2e-lakehouse/ducklake/metadata.sqlite --arg s3 "$S3" \
+  '{kind: "pqbench.remote-source", version: 1, inputs: [$catalog],
     env: {AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test",
       AWS_REGION: "us-east-1", AWS_ENDPOINT: $s3, AWS_ALLOW_HTTP: "true",
       AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false"}}' |
-  target/debug/pqbench bytemass --source -
+  target/debug/pqbench ducklake --source - --table events
 ```
 
 ```text
+DuckLake table: main.events
+snapshot: 1
+active data files: 1
+physical rows: 3
+active parquet bytes: 354
+compressed column bytes: 96
+uncompressed column bytes: 92
+active delete files: 0
+delete-file bytes: 0
+deleted rows: 0
 bytemass: ducklake-01a0c08f-88d1-771c-9eb8-a5eee4b98992.parquet
 column                              bytes/row
 label                                   17.33
@@ -270,13 +281,13 @@ The rustfs objects and Unity's H2 metadata use named volumes.
 
 Unity resolves an external Delta table's location and vends a credential for it;
 pqbench reads the log and measures the active files' footers. Iceberg REST names
-the current snapshot's files and does not vend credentials in this fixture.
-DuckLake names files from SQLite metadata and has no server. Vending on Unity is
-preset-credential mode (see [above](#curl-checks)), so it does **not** test
-per-table scoping, IAM enforcement, or Databricks managed tables. Measurement is
-physical Parquet storage, not logical rows after deletions. rustfs speaks the S3
-API but is not AWS. This stand is opt-in and separate from the fast Rust test
-suite.
+the current metadata JSON; `pqbench iceberg` reads that snapshot. DuckLake has
+no server: `pqbench ducklake` reads the committed SQLite catalog. Vending on
+Unity is preset-credential mode (see [above](#curl-checks)), so it does **not**
+test per-table scoping, IAM enforcement, or Databricks managed tables.
+Measurement is physical Parquet storage, not logical rows after deletions.
+rustfs speaks the S3 API but is not AWS. This stand is opt-in and separate from
+the fast Rust test suite.
 
 References: [Unity Catalog Compose](https://docs.unitycatalog.io/docker_compose/),
 [Unity Catalog credential vending](https://docs.databricks.com/aws/en/external-access/credential-vending),

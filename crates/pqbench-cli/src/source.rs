@@ -28,12 +28,12 @@ pub(crate) fn read_source_inputs(source: &str) -> Result<Vec<String>, CliError> 
 }
 
 /// Read a document naming one table, for commands that measure a snapshot.
-#[cfg(feature = "delta")]
-pub(crate) fn read_source_table(source: &str) -> Result<String, CliError> {
+#[cfg(any(feature = "delta", feature = "iceberg", feature = "ducklake"))]
+pub(crate) fn read_source_table(source: &str, kind: &str) -> Result<String, CliError> {
     let mut inputs = read_source(source)?.inputs;
     if inputs.len() > 1 {
         return Err(format!(
-            "a Delta snapshot is one table, but the source document names {} inputs",
+            "a {kind} snapshot is one table, but the source document names {} inputs",
             inputs.len()
         )
         .into());

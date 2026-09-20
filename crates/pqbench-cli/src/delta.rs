@@ -24,7 +24,7 @@ pub(crate) struct DeltaArgs {
 pub(crate) fn run(args: &DeltaArgs) -> Result<(), crate::CliError> {
     let request = DeltaRequest {
         table: match (&args.source, &args.table) {
-            (Some(source), _) => crate::source::read_source_table(source)?,
+            (Some(source), _) => crate::source::read_source_table(source, "Delta")?,
             (None, Some(table)) => table.clone(),
             (None, None) => return Err("delta needs a table or --source -".into()),
         },
