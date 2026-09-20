@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
-# The local stand behind `make lakehouse`: object storage holding a Delta table,
-# and a Unity Catalog that vends expiring credentials for it. Each verb is also
-# useful on its own; see docker/e2e-lakehouse/README.md.
+# The local stand behind `make lakehouse`: object storage and catalogs that
+# name Parquet objects for pqbench. Each verb is also useful on its own; see
+# docker/e2e-lakehouse/README.md.
 set -euo pipefail
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$root"
 CARGO=${CARGO:-cargo}
-compose() { docker compose -f "$root/docker/e2e-lakehouse/compose.yaml" "$@"; }
+compose() {
+    docker compose ${COMPOSE_PROJECT:+-p "$COMPOSE_PROJECT"} \
+        -f "$root/docker/e2e-lakehouse/compose.yaml" "$@"
+}
 aws_cli() { compose run --rm -T aws "$@"; }
+sqlite() { compose run --rm -T sqlite "$@"; }
 unity="http://localhost:${UNITY_CATALOG_PORT:-8080}/api/2.1/unity-catalog"
+iceberg="http://localhost:${ICEBERG_REST_PORT:-8181}"
 storage="http://localhost:${RUSTFS_PORT:-9000}"
-location="s3://lakehouse/unity/events"
+unity_location="s3://lakehouse/unity/events"
+iceberg_location="s3://lakehouse/iceberg"
+ducklake_location="s3://lakehouse/ducklake"
 vended="local/lakehouse/vended.env"
+iceberg_meta="$root/docker/e2e-lakehouse/iceberg/metadata-location"
+iceberg_files="$root/docker/e2e-lakehouse/iceberg/active-files"
 
 # Create, or accept that a previous run already did.
 register() {
@@ -21,6 +30,18 @@ register() {
         "" | *_ALREADY_EXISTS) ;;
         *) echo "$response" >&2; exit 1 ;;
     esac
+}
+
+storage_env() {
+    jq -n --arg s3 "$storage" '{
+        AWS_ACCESS_KEY_ID: "test", AWS_SECRET_ACCESS_KEY: "test",
+        AWS_REGION: "us-east-1", AWS_ENDPOINT: $s3, AWS_ENDPOINT_URL: $s3,
+        AWS_ALLOW_HTTP: "true", AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false"}'
+}
+
+source_document() {
+    jq -c -n --argjson inputs "$1" --argjson env "$(storage_env)" \
+        '{kind: "pqbench.remote-source", version: 1, inputs: $inputs, env: $env}'
 }
 
 # Unity cannot send AssumeRole to an S3-compatible endpoint
@@ -42,41 +63,44 @@ VENDED_SESSION_TOKEN=$token
 EOF
 }
 
+wait_http() {
+    local url="$1" label="$2"
+    local attempt
+    for attempt in $(seq 60); do
+        curl -fsS "$url" -o /dev/null 2> /dev/null && return
+        [ "$attempt" -lt 60 ] || break
+        sleep 2
+    done
+    echo "$label did not answer at $url" >&2
+    exit 1
+}
+
 up() {
     $CARGO build -p pqbench-cli --features delta-s3
-    # Storage first: Unity starts with a credential rustfs has to mint.
     compose up -d --wait rustfs
     mint_credential
     set -a
     . "$vended"
     set +a
-    compose up -d --wait unity-catalog
-    # A started JVM is not an available API.
-    for attempt in $(seq 60); do
-        curl -fsS "$unity/catalogs" -o /dev/null 2> /dev/null && return
-        [ "$attempt" -lt 60 ] || break
-        sleep 2
-    done
-    echo "Unity Catalog did not answer at $unity" >&2
-    exit 1
+    compose up -d --wait unity-catalog iceberg-rest
+    wait_http "$unity/catalogs" "Unity Catalog"
+    wait_http "$iceberg/v1/config" "Iceberg REST"
 }
 
 seed_s3() {
     aws_cli s3api head-bucket --bucket lakehouse 2> /dev/null ||
         aws_cli s3api create-bucket --bucket lakehouse > /dev/null
-    aws_cli s3 sync --delete /table "$location" > /dev/null
+    aws_cli s3 sync --delete /table "$unity_location" > /dev/null
 }
 
 seed_unity() {
     register catalogs '{"name": "pqbench"}'
     register schemas '{"catalog_name": "pqbench", "name": "demo"}'
-    # Unity cannot migrate a table definition, so replace it. The table is
-    # EXTERNAL: dropping it leaves the objects alone.
     curl -sS -X DELETE "$unity/tables/pqbench.demo.events" -o /dev/null
     register tables '{
         "catalog_name": "pqbench", "schema_name": "demo", "name": "events",
         "table_type": "EXTERNAL", "data_source_format": "DELTA",
-        "storage_location": "'"$location"'",
+        "storage_location": "'"$unity_location"'",
         "columns": [
             {"name": "id", "type_name": "LONG", "type_text": "long", "position": 0,
              "nullable": true,
@@ -86,29 +110,96 @@ seed_unity() {
              "type_json": "{\"name\": \"label\", \"type\": \"string\", \"nullable\": true, \"metadata\": {}}"}]}'
 }
 
-# The README's pipe, so the stand is seen to answer the question it exists for.
-check() {
+seed_iceberg() {
+    aws_cli s3 sync --delete /iceberg/demo "$iceberg_location/demo" > /dev/null
+    curl -sS -X POST "$iceberg/v1/namespaces" -H 'Content-Type: application/json' \
+        -d '{"namespace":["demo"]}' -o /dev/null || true
+    curl -sS -X DELETE "$iceberg/v1/namespaces/demo/tables/events" -o /dev/null || true
+    local metadata response
+    metadata=$(tr -d '\n' < "$iceberg_meta")
+    response=$(curl -sS -X POST "$iceberg/v1/namespaces/demo/register" \
+        -H 'Content-Type: application/json' \
+        -d "{\"name\":\"events\",\"metadata-location\":\"$metadata\"}")
+    if ! jq -e '."metadata-location" // .metadata.location' <<< "$response" > /dev/null; then
+        echo "$response" >&2
+        exit 1
+    fi
+}
+
+seed_ducklake() {
+    aws_cli s3 sync --delete /ducklake "$ducklake_location" > /dev/null
+}
+
+assert_events() {
+    jq -e --arg field "$1" '.[$field] == 3
+        and ((.file_count // .files) == 1 or .file_count == 1)
+        and ([.columns[].path] | sort) == ["id", "label"]' > /dev/null
+}
+
+check_unity() {
     curl -sS -X POST "$unity/temporary-table-credentials" \
             -H 'Content-Type: application/json' \
             -d "$(curl -sS "$unity/tables/pqbench.demo.events" |
                 jq -c '{table_id, operation: "READ"}')" |
         jq -c --arg s3 "$storage" '{kind: "pqbench.remote-source", version: 1,
-            inputs: ["'"$location"'"],
+            inputs: ["'"$unity_location"'"],
             env: (.aws_temp_credentials | {AWS_ACCESS_KEY_ID: .access_key_id,
                 AWS_SECRET_ACCESS_KEY: .secret_access_key,
                 AWS_SESSION_TOKEN: .session_token, AWS_REGION: "us-east-1",
                 AWS_ENDPOINT: $s3, AWS_ENDPOINT_URL: $s3, AWS_ALLOW_HTTP: "true",
                 AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false"})}' |
         target/debug/pqbench delta --source - --json |
-        jq -e '.physical_rows == 3 and .file_count == 1
-            and ([.columns[].path] | sort) == ["id", "label"]' > /dev/null
-    echo "Unity Catalog ready: $unity/tables/pqbench.demo.events (storage $storage)"
+        assert_events physical_rows
+    echo "Unity Catalog ready: $unity/tables/pqbench.demo.events"
+}
+
+check_iceberg() {
+    local loaded files
+    loaded=$(curl -sS "$iceberg/v1/namespaces/demo/tables/events")
+    jq -e '.metadata["current-snapshot-id"] != null' <<< "$loaded" > /dev/null
+    files=$(jq -R -s -c 'split("\n") | map(select(length > 0))' "$iceberg_files")
+    source_document "$files" |
+        target/debug/pqbench bytemass --source - --json |
+        assert_events num_rows
+    echo "Iceberg REST ready: $iceberg/v1/namespaces/demo/tables/events"
+}
+
+check_ducklake() {
+    local deletes files
+    deletes=$(sqlite -csv -noheader /metadata.sqlite \
+        "SELECT count(*) FROM ducklake_delete_file WHERE end_snapshot IS NULL")
+    if [ "${deletes:-0}" -ne 0 ]; then
+        echo "DuckLake fixture has delete files; pqbench measures physical files only" >&2
+        exit 1
+    fi
+    files=$(sqlite -json /metadata.sqlite \
+        "SELECT CASE path_is_relative WHEN 1
+            THEN 's3://lakehouse/ducklake/main/events/' || path
+            ELSE path END AS uri
+         FROM ducklake_data_file WHERE end_snapshot IS NULL" |
+        jq -c 'map(.uri)')
+    source_document "$files" |
+        target/debug/pqbench bytemass --source - --json |
+        assert_events num_rows
+    echo "DuckLake ready: $ducklake_location (files from ducklake_data_file)"
+}
+
+check() {
+    check_unity
+    check_iceberg
+    check_ducklake
 }
 
 case "${1:-}" in
     up) up ;;
     seed-s3) seed_s3 ;;
     seed-unity) seed_unity ;;
+    seed-iceberg) seed_iceberg ;;
+    seed-ducklake) seed_ducklake ;;
     check) check ;;
-    *) echo "usage: ${0##*/} up|seed-s3|seed-unity|check" >&2; exit 64 ;;
+    check-unity) check_unity ;;
+    check-iceberg) check_iceberg ;;
+    check-ducklake) check_ducklake ;;
+    *) echo "usage: ${0##*/} up|seed-s3|seed-unity|seed-iceberg|seed-ducklake|check" >&2
+       exit 64 ;;
 esac
