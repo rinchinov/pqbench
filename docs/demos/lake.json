@@ -1,0 +1,70 @@
+{
+  "kind": "pqbench.collection",
+  "version": 1,
+  "lake": "commerce",
+  "catalogs": [
+    {
+      "name": "retail",
+      "schemas": [
+        {
+          "name": "bronze",
+          "tables": [
+            {
+              "name": "orders_raw",
+              "source": {
+                "kind": "pqbench.remote-source",
+                "version": 1,
+                "inputs": ["crates/pqbench/tests/fixtures/small_reddit_none.parquet"]
+              }
+            },
+            {
+              "name": "reviews_raw",
+              "source": {
+                "kind": "pqbench.remote-source",
+                "version": 1,
+                "inputs": ["data/reviews.parquet"]
+              }
+            },
+            {
+              "name": "customers_raw",
+              "source": {
+                "kind": "pqbench.remote-source",
+                "version": 1,
+                "inputs": ["crates/pqbench/tests/fixtures/small_snappy.parquet"]
+              }
+            }
+          ]
+        },
+        {
+          "name": "gold",
+          "tables": [
+            {
+              "name": "fact_orders",
+              "source": {
+                "kind": "pqbench.remote-source",
+                "version": 1,
+                "inputs": ["crates/pqbench/tests/fixtures/small_snappy.parquet"]
+              }
+            },
+            {
+              "name": "fact_reviews",
+              "source": {
+                "kind": "pqbench.remote-source",
+                "version": 1,
+                "inputs": ["data/reviews.parquet"]
+              }
+            },
+            {
+              "name": "dim_customer",
+              "source": {
+                "kind": "pqbench.remote-source",
+                "version": 1,
+                "inputs": ["crates/pqbench/tests/fixtures/small_reddit_none.parquet"]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

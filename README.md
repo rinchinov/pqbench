@@ -116,6 +116,8 @@ the active files are measured from their footers only.
 
 ## Documentation
 
+- [Visual demos](docs/demo.md) — lake treemap, terminal recordings, public samples
+- [Collections](docs/collections.md) — lake / catalog / schema input and report
 - [Unity Catalog E2E example](docker/e2e-lakehouse/README.md) — a catalog vending
   expiring credentials into `--source -`, over rustfs S3
 - [Delta tables](docs/delta.md) — snapshot resolution, report shape, limitations

@@ -60,7 +60,8 @@ Local footer reads run on a blocking pool so they can overlap as well.
 `--json` writes the **output tree**: the same lake / catalog / schema / table
 nesting as the input, with `status` and `analysis` on each table instead of
 `source`. `--d3` embeds that tree in one HTML page: a layer list on the left and a
-clickable d3 treemap on the right. The map shows two layers at once: the
+clickable d3 treemap on the right. A recorded walkthrough and screenshots live
+in the [visual demos](demo.md). The map shows two layers at once: the
 current group and the next (Bostock nested padding). Groups use Tableau 10;
 column leaves use ColorBrewer YlGnBu. Clicking a cell or a list row drills
 lake → catalog → schema → table → columns. The treemap loads d3 from a CDN.

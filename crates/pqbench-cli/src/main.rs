@@ -28,6 +28,7 @@ Examples:
   pqbench bytemass part-1.parquet part-2.parquet
   pqbench bytemass 'data/*.parquet'
   producer | pqbench bytemass --source -
+  producer | pqbench bytemass --collection - --d3 --output-dir reports
   pqbench bytemass data.parquet --d3 > treemap.html && xdg-open treemap.html
 "#
 )]
@@ -47,6 +48,7 @@ enum Command {
 Examples:
   pqbench bytemass data.parquet
   producer | pqbench bytemass --source -
+  producer | pqbench bytemass --collection - --d3 --output-dir reports
   pqbench bytemass data.parquet --d3 > treemap.html && xdg-open treemap.html
 "#)]
     Bytemass(bytemass::BytemassArgs),
