@@ -25,11 +25,27 @@ services:
   # Its own metadata is persisted in the named volume below. Catalog entries can
   # point at the same S3-compatible storage used by the other services.
   #
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:1.10.0@sha256:df2e9dd421928b7aab01557678ce8e2bb73064d0e253baebd72adad3439ffc2e
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://lakehouse/iceberg
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://rustfs:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+    ports:
+      - "127.0.0.1:${ICEBERG_REST_PORT:-8181}:8181"
+    depends_on:
+      rustfs:
+        condition: service_healthy
+
   # The `s3.*` entries are Unity's per-bucket configuration. Unity cannot send
   # AssumeRole to an S3-compatible endpoint (unitycatalog/unitycatalog#43), so
   # the stand hands it a session credential that rustfs already minted and Unity
-  # vends that verbatim — its documented preset-credential mode. `make vend`
-  # (smoke.sh) fills these in; without them Unity has no credential to vend.
+  # vends that verbatim — its documented preset-credential mode. `make lakehouse`
+  # fills these in; without them Unity has no credential to vend.
   unity-catalog:
     image: unitycatalog/unitycatalog:v0.6.0@sha256:606349a178d99c3b42d9c9c8cfea72f04efb3cfc350ee89eec45368b96e50086
     environment:
@@ -46,7 +62,7 @@ services:
       rustfs:
         condition: service_healthy
 
-  # A one-off S3 client, not a server: it uploads `table/` and mints the session
+  # A one-off S3 client, not a server: it uploads fixtures and mints the session
   # credential Unity vends. `make lakehouse` runs it; nothing else needs it.
   aws:
     profiles: [tools]
@@ -58,6 +74,16 @@ services:
       AWS_ENDPOINT_URL: http://rustfs:9000
     volumes:
       - ./table:/table:ro
+      - ./iceberg:/iceberg:ro
+      - ./ducklake/objects:/ducklake:ro
+
+  # One-off reader for DuckLake's committed SQLite metadata.
+  sqlite:
+    profiles: [tools]
+    image: keinos/sqlite3:3.47.2@sha256:4e75252fb72327cdcb67ced362d76299acd1fbe829629f22ae2ab9d25b35ec54
+    entrypoint: ["sqlite3"]
+    volumes:
+      - ./ducklake/metadata.sqlite:/metadata.sqlite:ro
 
 volumes:
   rustfs-data:

@@ -13,7 +13,8 @@ TEST_FLAGS ?=
 LAKEHOUSE = CARGO="$(CARGO)" ./docker/e2e-lakehouse/lakehouse.sh
 
 .PHONY: all fmt fmt-check build test lint cache-stats samples lakehouse \
-	lakehouse-up lakehouse-seed-s3 lakehouse-seed-unity check clean
+	lakehouse-up lakehouse-seed-s3 lakehouse-seed-unity \
+	lakehouse-seed-iceberg lakehouse-seed-ducklake check clean
 
 all: fmt build test lint
 
@@ -43,8 +44,9 @@ cache-stats:
 samples:
 	./scripts/fetch_samples.sh
 
-# Local Unity Catalog, ready to query: see docker/e2e-lakehouse/README.md.
-lakehouse: lakehouse-seed-s3 lakehouse-seed-unity
+# Local catalogs, ready to query: see docker/e2e-lakehouse/README.md.
+lakehouse: lakehouse-seed-s3 lakehouse-seed-unity lakehouse-seed-iceberg \
+	lakehouse-seed-ducklake
 	$(LAKEHOUSE) check
 
 # Storage, a credential for Unity to vend, and Unity answering.
@@ -58,6 +60,14 @@ lakehouse-seed-s3: lakehouse-up
 # That table, registered as an external Delta table in Unity Catalog.
 lakehouse-seed-unity: lakehouse-up
 	$(LAKEHOUSE) seed-unity
+
+# The Iceberg table in docker/e2e-lakehouse/iceberg/, registered over REST.
+lakehouse-seed-iceberg: lakehouse-up
+	$(LAKEHOUSE) seed-iceberg
+
+# DuckLake Parquet plus the committed SQLite metadata that names those files.
+lakehouse-seed-ducklake: lakehouse-up
+	$(LAKEHOUSE) seed-ducklake
 
 check: fmt-check lint test
 
