@@ -75,6 +75,8 @@ on standard input instead of a path list:
 ```sh
 producer | pqbench bytemass --source -   # inputs name Parquet objects
 producer | pqbench delta --source -      # inputs name one Delta table
+producer | pqbench iceberg --source -    # inputs name one metadata JSON
+producer | pqbench ducklake --source - --table events
 ```
 
 ```json
@@ -100,11 +102,37 @@ pqbench delta ./path/to/table
 Add `--features delta-s3` to resolve and measure Delta tables at `s3://` URIs;
 the active files are measured from their footers only.
 
+### iceberg
+
+Byte-mass summary of an Iceberg snapshot from its metadata JSON. Feature-gated
+— build with `--features iceberg` to get the command:
+
+```sh
+pqbench iceberg ./table/metadata/v2.metadata.json
+```
+
+Add `--features iceberg-s3` to resolve metadata and data files at `s3://` URIs.
+Delete files are counted and not applied.
+
+### ducklake
+
+Byte-mass summary of a DuckLake table snapshot from a local SQLite catalog.
+Feature-gated — build with `--features ducklake` to get the command:
+
+```sh
+pqbench ducklake ./catalog.sqlite --table events
+```
+
+Add `--features ducklake-s3` when the catalog's `data_path` is `s3://`. Delete
+files are counted and not applied.
+
 ## Documentation
 
-- [Unity Catalog E2E example](docker/e2e-lakehouse/README.md) — a catalog vending
-  expiring credentials into `--source -`, over rustfs S3
+- [Unity Catalog E2E example](docker/e2e-lakehouse/README.md) — catalogs naming
+  tables for `--source -`, over rustfs S3
 - [Delta tables](docs/delta.md) — snapshot resolution, report shape, limitations
+- [Iceberg tables](docs/iceberg.md) — metadata JSON + Avro manifests
+- [DuckLake tables](docs/ducklake.md) — SQLite catalog snapshot resolution
 - [Docker](docs/docker.md) — build, run, and publish a container image
 
 ## Contributing

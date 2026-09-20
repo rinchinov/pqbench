@@ -82,11 +82,17 @@ jobs:
             test_flags: ""
           - os: ubuntu-24.04
             arch: amd64
+            features: iceberg,ducklake
+            cargo_flags: --features iceberg,ducklake
+            test_flags: ""
+          - os: ubuntu-24.04
+            arch: amd64
             features: all-features
             cargo_flags: --all-features
             test_flags: --include-ignored
           # arm64: default catches arch/codec issues, all-features covers the
-          # delta/aws build. aws/delta alone stay amd64 to bound the job count.
+          # delta/aws/iceberg/ducklake build. Isolated feature sets stay amd64
+          # to bound the job count.
           - os: ubuntu-24.04-arm
             arch: arm64
             features: ""

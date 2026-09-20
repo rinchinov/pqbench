@@ -25,10 +25,12 @@ pub fn write_parquet(path: &Path, rows: i64) {
     writer.close().unwrap();
 }
 
+#[allow(dead_code)]
 pub struct Fixture {
     pub directory: TempDir,
 }
 
+#[allow(dead_code)]
 impl Fixture {
     pub fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
@@ -86,6 +88,7 @@ impl Fixture {
     }
 }
 
+#[allow(dead_code)]
 pub fn metadata(configuration: Value) -> Value {
     json!({"metaData": {
         "id": "967e1749-2635-481d-a114-897e027d7000",
@@ -100,6 +103,7 @@ pub fn metadata(configuration: Value) -> Value {
     }})
 }
 
+#[allow(dead_code)]
 pub fn remove(path: &str) -> Value {
     json!({"remove": {"path": path.replace(' ', "%20"), "deletionTimestamp": 1, "dataChange": true}})
 }

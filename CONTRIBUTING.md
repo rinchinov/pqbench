@@ -43,7 +43,8 @@ make check        # = fmt-check + clippy -D warnings + test
 - `make check` is the gate and runs automatically in the pre-commit hook.
 - Feature sets are exercised through the same targets:
   `make check CARGO_FEATURES=--all-features` (or `CARGO_FEATURES="--features aws"`,
-  `CARGO_FEATURES="--features delta"`). CI runs one clippy over
+  `CARGO_FEATURES="--features delta"`,
+  `CARGO_FEATURES="--features iceberg,ducklake"`). CI runs one clippy over
   `--all-features` and a test leg per set, with default and all-features also on
   arm64.
 - The network e2e (`redset`) is `#[ignore]`d so local `make test` stays offline

@@ -20,7 +20,6 @@ iceberg_location="s3://lakehouse/iceberg"
 ducklake_location="s3://lakehouse/ducklake"
 vended="local/lakehouse/vended.env"
 iceberg_meta="$root/docker/e2e-lakehouse/iceberg/metadata-location"
-iceberg_files="$root/docker/e2e-lakehouse/iceberg/active-files"
 
 # Create, or accept that a previous run already did.
 register() {
@@ -76,7 +75,7 @@ wait_http() {
 }
 
 up() {
-    $CARGO build -p pqbench-cli --features delta-s3
+    $CARGO build -p pqbench-cli --features delta-s3,iceberg-s3,ducklake-s3
     compose up -d --wait rustfs
     mint_credential
     set -a
@@ -154,34 +153,21 @@ check_unity() {
 }
 
 check_iceberg() {
-    local loaded files
+    local loaded metadata
     loaded=$(curl -sS "$iceberg/v1/namespaces/demo/tables/events")
     jq -e '.metadata["current-snapshot-id"] != null' <<< "$loaded" > /dev/null
-    files=$(jq -R -s -c 'split("\n") | map(select(length > 0))' "$iceberg_files")
-    source_document "$files" |
-        target/debug/pqbench bytemass --source - --json |
-        assert_events num_rows
+    metadata=$(jq -r '."metadata-location"' <<< "$loaded")
+    source_document "[\"$metadata\"]" |
+        target/debug/pqbench iceberg --source - --json |
+        assert_events physical_rows
     echo "Iceberg REST ready: $iceberg/v1/namespaces/demo/tables/events"
 }
 
 check_ducklake() {
-    local deletes files
-    deletes=$(sqlite -csv -noheader /metadata.sqlite \
-        "SELECT count(*) FROM ducklake_delete_file WHERE end_snapshot IS NULL")
-    if [ "${deletes:-0}" -ne 0 ]; then
-        echo "DuckLake fixture has delete files; pqbench measures physical files only" >&2
-        exit 1
-    fi
-    files=$(sqlite -json /metadata.sqlite \
-        "SELECT CASE path_is_relative WHEN 1
-            THEN 's3://lakehouse/ducklake/main/events/' || path
-            ELSE path END AS uri
-         FROM ducklake_data_file WHERE end_snapshot IS NULL" |
-        jq -c 'map(.uri)')
-    source_document "$files" |
-        target/debug/pqbench bytemass --source - --json |
-        assert_events num_rows
-    echo "DuckLake ready: $ducklake_location (files from ducklake_data_file)"
+    source_document "[\"$root/docker/e2e-lakehouse/ducklake/metadata.sqlite\"]" |
+        target/debug/pqbench ducklake --source - --table events --json |
+        assert_events physical_rows
+    echo "DuckLake ready: $root/docker/e2e-lakehouse/ducklake/metadata.sqlite"
 }
 
 check() {

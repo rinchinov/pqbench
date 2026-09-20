@@ -10,6 +10,10 @@ mod source;
 
 #[cfg(feature = "delta")]
 mod delta;
+#[cfg(feature = "ducklake")]
+mod ducklake;
+#[cfg(feature = "iceberg")]
+mod iceberg;
 
 /// The CLI's single error channel: any error from the io, parquet, or codec
 /// layers, converted via `?`.
@@ -56,6 +60,20 @@ Examples:
   producer | pqbench delta --source -
 "#)]
     Delta(delta::DeltaArgs),
+    /// analyze the active Parquet files in an Iceberg snapshot
+    #[cfg(feature = "iceberg")]
+    #[command(after_help = r#"Examples:
+  pqbench iceberg table/metadata/v2.metadata.json --json
+  producer | pqbench iceberg --source -
+"#)]
+    Iceberg(iceberg::IcebergArgs),
+    /// analyze the active Parquet files in a DuckLake snapshot
+    #[cfg(feature = "ducklake")]
+    #[command(after_help = r#"Examples:
+  pqbench ducklake catalog.sqlite --table events --json
+  producer | pqbench ducklake --source - --table events
+"#)]
+    Ducklake(ducklake::DuckLakeArgs),
 }
 
 fn main() -> ExitCode {
@@ -66,6 +84,10 @@ fn main() -> ExitCode {
         Command::Bytemass(args) => bytemass::run(&args),
         #[cfg(feature = "delta")]
         Command::Delta(args) => delta::run(&args),
+        #[cfg(feature = "iceberg")]
+        Command::Iceberg(args) => iceberg::run(&args),
+        #[cfg(feature = "ducklake")]
+        Command::Ducklake(args) => ducklake::run(&args),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
