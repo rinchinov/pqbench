@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 
 fn run(document: &Value, args: &[&str]) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_pqbench"))
-        .args(["bytemass", "--collection", "-"])
+        .args(["bytemass"])
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -18,6 +18,17 @@ fn run(document: &Value, args: &[&str]) -> std::process::Output {
         .write_all(document.to_string().as_bytes())
         .unwrap();
     child.wait_with_output().unwrap()
+}
+
+fn run_file(document: &Value, extra: &[&str]) -> std::process::Output {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("collection.json");
+    std::fs::write(&path, document.to_string()).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_pqbench"))
+        .args(["bytemass", path.to_str().unwrap()])
+        .args(extra)
+        .output()
+        .unwrap()
 }
 
 #[test]
@@ -42,6 +53,25 @@ fn collection_pipe_emits_results_even_when_one_table_fails() {
     assert!(String::from_utf8(output.stderr)
         .unwrap()
         .contains("1 table(s) failed"));
+}
+
+#[test]
+fn collection_file_is_detected_without_a_flag() {
+    let file = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/small_reddit_none.parquet"
+    );
+    let document = json!({"kind":"pqbench.collection", "version":1, "tables":[
+        {"name":"only", "source":{"kind":"pqbench.remote-source", "version":1, "inputs":[file]}}
+    ]});
+    let output = run_file(&document, &["--json"]);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["tables"][0]["status"], "COMPLETE");
 }
 
 #[test]
@@ -88,13 +118,11 @@ fn rejects_zero_concurrency_and_conflicting_inputs() {
     for args in [
         vec!["--table-jobs", "0"],
         vec!["--file-jobs", "0"],
-        vec!["--source", "-"],
-        vec!["other.parquet"],
         vec!["--json", "--d3"],
         vec!["--output-dir", "reports"],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_pqbench"))
-            .args(["bytemass", "--collection", "-"])
+            .args(["bytemass"])
             .args(args)
             .output()
             .unwrap();

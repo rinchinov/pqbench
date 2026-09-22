@@ -22,7 +22,7 @@ command -v python3 >/dev/null 2>&1 || {
 html=.docker-data/pqbench-lake.html
 frames=.docker-data/lake-frames
 mkdir -p "$frames"
-target/debug/pqbench bytemass --collection docs/demos/lake.json --d3 >"$html"
+target/debug/pqbench bytemass docs/demos/lake.json --d3 >"$html"
 
 python3 - "$html" "$frames" <<'PY'
 import sys

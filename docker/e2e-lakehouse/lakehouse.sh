@@ -99,8 +99,9 @@ check() {
                 AWS_SESSION_TOKEN: .session_token, AWS_REGION: "us-east-1",
                 AWS_ENDPOINT: $s3, AWS_ENDPOINT_URL: $s3, AWS_ALLOW_HTTP: "true",
                 AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false"})}' |
-        target/debug/pqbench delta --source - --json |
-        jq -e '.physical_rows == 3 and .file_count == 1
+        target/debug/pqbench table |
+        target/debug/pqbench bytemass --json |
+        jq -e '.num_rows == 3 and .file_count == 1
             and ([.columns[].path] | sort) == ["id", "label"]' > /dev/null
     echo "Unity Catalog ready: $unity/tables/pqbench.demo.events (storage $storage)"
 }

@@ -67,29 +67,50 @@ feature; a URI whose backend is not compiled in fails at runtime with the
 missing feature named. The library entry point (`bytemass::bytemass`) is
 always available and never feature-gated.
 
-### Nested table collections
+### table
 
-Analyze tables concurrently while preserving their lake/catalog/schema hierarchy:
-
-```bash
-producer | pqbench bytemass --collection - --table-jobs 4 --file-jobs 32 \
-  --d3 --output-dir reports
-```
-
-Each table carries the existing source document. `--json` emits the same tree
-with a result on each table; `--d3` embeds that tree in one HTML page: a layer list plus a clickable
-treemap that drills lake layers. See [collections](docs/collections.md) for the input format
-and a Databricks CLI → `jq` → pqbench example.
-
-### --source -
-
-A producer that resolves names in a catalog hands pqbench a versioned document
-on standard input instead of a path list:
+Detect the table format, load its metadata, and emit a `pqbench.table`
+document. For now only Delta is loaded: the command reads the transaction log
+and the active files. A TTY pretty-prints the log; a pipe writes the full
+document. `bytemass` understands that document:
 
 ```sh
-producer | pqbench bytemass --source -   # inputs name Parquet objects
-producer | pqbench delta --source -      # inputs name one Delta table
+pqbench table ./path/to/table
+pqbench table ./path/to/table | pqbench bytemass
+pqbench table ./path/to/table | pqbench bytemass --d3 > treemap.html
 ```
+
+Format detection runs first (`_delta_log` is Delta; `metadata/version-hint.text`
+is Iceberg). Iceberg is recognized and rejected until a loader exists. Delta
+needs `--features delta` (`delta-s3` for `s3://`).
+
+A producer can hand `table` the same `pqbench.remote-source` document used
+elsewhere — one table URI plus optional `AWS_*` credentials — and the table
+document carries those credentials to `bytemass`:
+
+```sh
+producer | pqbench table | pqbench bytemass
+```
+
+### Nested table collections
+
+Analyze tables concurrently while preserving their lake/catalog/schema hierarchy.
+`bytemass` detects a `pqbench.collection` document on stdin or as a file:
+
+```bash
+pqbench bytemass lake.json --table-jobs 4 --file-jobs 32 \
+  --d3 --output-dir reports
+producer | pqbench bytemass --d3 --output-dir reports
+```
+
+`--json` emits the same tree with a result on each table; `--d3` embeds that
+tree in one HTML page: a layer list plus a clickable treemap that drills lake
+layers. See [collections](docs/collections.md) for the input format and a
+Databricks CLI → `jq` → pqbench example.
+
+### Documents on stdin or a file
+
+`bytemass` and `table` read the `kind` field instead of taking a format flag:
 
 ```json
 {"kind": "pqbench.remote-source", "version": 1,
@@ -97,30 +118,21 @@ producer | pqbench delta --source -      # inputs name one Delta table
  "env": {"AWS_SESSION_TOKEN": "..."}}
 ```
 
-`env` is optional, accepts only `AWS_*` names, and is applied before the read,
-so a catalog that vends expiring credentials can pass them through the pipe
-rather than into your shell. pqbench keeps no catalog dependency of its own; the
+`pqbench.remote-source` names Parquet objects for `bytemass`, or one table URI
+for `table`. `pqbench.table` is the output of `pqbench table`.
+`pqbench.collection` is a nested list of tables. `env` is optional, accepts
+only `AWS_*` names, and is applied before the read, so a catalog that vends
+expiring credentials can pass them through the pipe rather than into your
+shell. pqbench keeps no catalog dependency of its own; the
 [Unity Catalog example](docker/e2e-lakehouse/README.md) shows a producer.
-
-### delta
-
-Byte-mass summary of a local Delta table snapshot. Feature-gated — build with
-`--features delta` to get the command:
-
-```sh
-pqbench delta ./path/to/table
-```
-
-Add `--features delta-s3` to resolve and measure Delta tables at `s3://` URIs;
-the active files are measured from their footers only.
 
 ## Documentation
 
 - [Visual demos](docs/demo.md) — lake treemap, terminal recordings, public samples
 - [Collections](docs/collections.md) — lake / catalog / schema input and report
 - [Unity Catalog E2E example](docker/e2e-lakehouse/README.md) — a catalog vending
-  expiring credentials into `--source -`, over rustfs S3
-- [Delta tables](docs/delta.md) — snapshot resolution, report shape, limitations
+  expiring credentials into `pqbench table`, over rustfs S3
+- [Delta tables](docs/delta.md) — log load, `table | bytemass`, limitations
 - [Docker](docs/docker.md) — build, run, and publish a container image
 
 ## Contributing

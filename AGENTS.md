@@ -182,7 +182,7 @@ reusable inputs for demos instead of generating large fixtures from scratch.
 
 Use the GCS file for a fast happy-path check, Apache fixtures for compatibility
 and regression coverage, Azure Census for a medium cloud example, NYC Taxi for
-a meaningful single-file treemap, and the Daft S3 table for `pqbench delta`.
+a meaningful single-file treemap, and the Daft S3 table for `pqbench table`.
 The lake walkthrough uses the commerce/retail bronze and gold catalog.
 
 Unity Catalog sample tables such as `samples.nyctaxi`, `samples.tpcds_sf1`, and
@@ -194,7 +194,7 @@ access errors on 2026-09-19.
 ## Repo layout
 
 - `crates/pqbench/` — the library (bench, bytemass, codecs, compression, lz,
-  parquet, report, stats)
+  parquet, report, stats, table)
 - `crates/pqbench-cli/` — the `pqbench` binary (thin wrapper over the library)
 - `scripts/` — build / sample / smoke-test helpers
 - `docs/` — user documentation (`demo.md`, `collections.md`, `docker.md`)

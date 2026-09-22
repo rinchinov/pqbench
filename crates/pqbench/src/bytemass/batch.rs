@@ -53,7 +53,7 @@ pub struct Table {
     pub name: String,
     #[serde(default)]
     pub format: Format,
-    /// Optional Delta snapshot version (as on `pqbench delta --version`).
+    /// Optional Delta snapshot version (as on `pqbench table --version`).
     #[serde(default)]
     pub snapshot_version: Option<u64>,
     pub source: Source,

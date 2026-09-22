@@ -1,7 +1,8 @@
 # Analyze a collection of tables
 
-Feed pqbench a nested list of table invocations. Each table carries the same
-`pqbench.remote-source` v1 document as `bytemass --source -` or `delta --source -`:
+Feed pqbench a nested list of table invocations. `bytemass` detects a
+`pqbench.collection` document on stdin or as a file. Each table carries the
+same `pqbench.remote-source` v1 document as a lone source file or pipe:
 
 ```json
 {
@@ -45,10 +46,10 @@ S3 Delta needs `delta-s3`. Existing unsupported Delta features remain unsupporte
 ```bash
 cargo build -p pqbench-cli --features delta-s3
 
-target/debug/pqbench bytemass --collection tables.json \
+target/debug/pqbench bytemass tables.json \
   --table-jobs 4 --file-jobs 32 --json > report.json
 
-cat tables.json | target/debug/pqbench bytemass --collection - \
+cat tables.json | target/debug/pqbench bytemass \
   --table-jobs 4 --file-jobs 32 --d3 --output-dir reports
 ```
 
@@ -108,7 +109,7 @@ databricks tables list "$catalog" "$schema" --omit-columns --omit-properties -o 
         {name, format: "delta", source: {
           kind: "pqbench.remote-source", version: 1,
           inputs: [.storage_location]}}]}]}]}' |
-  target/debug/pqbench bytemass --collection - --d3 --output-dir reports
+  target/debug/pqbench bytemass --d3 --output-dir reports
 ```
 
 For all schemas in selected catalogs, the supplied Bash helper builds the same
@@ -118,7 +119,7 @@ current Databricks identity:
 ```bash
 set -euo pipefail
 bash scripts/databricks-collection.sh analytics finance |
-  target/debug/pqbench bytemass --collection - \
+  target/debug/pqbench bytemass \
     --table-jobs 4 --file-jobs 32 --d3 --output-dir reports
 ```
 
@@ -134,7 +135,7 @@ For example, wrap an existing single-table producer without changing its source:
 your-source-producer |
   jq '{kind: "pqbench.collection", version: 1, tables: [
     {name: "orders", format: "delta", source: .}]}' |
-  target/debug/pqbench bytemass --collection - --json
+  target/debug/pqbench bytemass --json
 ```
 
 `source.env` remains AWS-only. In collection mode these values are passed to

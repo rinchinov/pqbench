@@ -11,11 +11,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
+use deltalake::logstore::LogStore;
 use deltalake::{DeltaTable, DeltaTableBuilder};
 use futures::{stream, StreamExt, TryStreamExt};
 use serde::Serialize;
 use url::Url;
 
+use super::{LoadRequest, LogCommit, TableFile, TableFormat, TableInfo};
 use crate::bytemass::{self, aggregate, BytemassRequest, ColumnMassSummary, MassRow, MassSummary};
 
 /// Errors resolving a local snapshot or measuring its active files.
@@ -90,6 +92,40 @@ pub struct DeltaRequest {
     pub version: Option<u64>,
 }
 
+/// Load the transaction log and the active files of a Delta snapshot.
+///
+/// Does not read Parquet footers. `request.uri` is a filesystem path or a
+/// storage URI. Run inside a Tokio runtime.
+///
+/// # Errors
+/// Fails for an unreadable log, invalid snapshots, external data paths,
+/// column mapping, or deletion vectors. Commits whose JSON has been vacuumed
+/// after a checkpoint are omitted from the log.
+pub async fn load(request: &LoadRequest) -> Result<TableInfo, Error> {
+    let table = open_table(&request.uri, request.version, &request.env).await?;
+    let snapshot = snapshot_info(&table)?;
+    let files = active_files(&table).await?;
+    let log = read_log(&table, snapshot.version).await?;
+    Ok(TableInfo {
+        kind: "pqbench.table".into(),
+        version: 1,
+        format: TableFormat::Delta,
+        uri: request.uri.clone(),
+        snapshot_version: snapshot.version,
+        partition_columns: snapshot.partition_columns,
+        log,
+        files: files
+            .into_iter()
+            .map(|file| TableFile {
+                path: file.relative,
+                uri: file.input,
+                size: file.expected,
+            })
+            .collect(),
+        env: request.env.clone(),
+    })
+}
+
 /// Analyze the latest or requested version of a Delta table.
 ///
 /// `request.table` is a filesystem path or a storage URI. Bare paths and
@@ -119,28 +155,7 @@ pub async fn delta_with_options(
     options: &BTreeMap<String, String>,
     reader: &bytemass::FooterReader,
 ) -> Result<TableReport, Error> {
-    let url = if request.table.contains("://") {
-        let url = Url::parse(&request.table).map_err(|e| Error(e.to_string()))?;
-        if url.scheme() == "file" {
-            let path = url
-                .to_file_path()
-                .map_err(|()| Error("invalid local table URI".into()))?;
-            Url::from_directory_path(local_root(&path)?)
-                .map_err(|()| Error("invalid table path".into()))?
-        } else {
-            url
-        }
-    } else {
-        Url::from_directory_path(local_root(Path::new(&request.table))?)
-            .map_err(|()| Error("invalid table path".into()))?
-    };
-    let mut builder = DeltaTableBuilder::from_url(url)
-        .map_err(delta_error)?
-        .with_storage_options(options.clone().into_iter().collect());
-    if let Some(version) = request.version {
-        builder = builder.with_version(version);
-    }
-    let table = builder.load().await.map_err(delta_error)?;
+    let table = open_table(&request.table, request.version, options).await?;
     let snapshot = snapshot_info(&table)?;
     let active = active_files(&table).await?;
     let mut reads = stream::iter(active.iter().map(|file| async move {
@@ -233,6 +248,64 @@ struct ActiveFile {
     input: String,
     relative: String,
     expected: u64,
+}
+
+async fn open_table(
+    uri: &str,
+    version: Option<u64>,
+    options: &BTreeMap<String, String>,
+) -> Result<DeltaTable, Error> {
+    let url = if uri.contains("://") {
+        let url = Url::parse(uri).map_err(|e| Error(e.to_string()))?;
+        if url.scheme() == "file" {
+            let path = url
+                .to_file_path()
+                .map_err(|()| Error("invalid local table URI".into()))?;
+            Url::from_directory_path(local_root(&path)?)
+                .map_err(|()| Error("invalid table path".into()))?
+        } else {
+            url
+        }
+    } else {
+        Url::from_directory_path(local_root(Path::new(uri))?)
+            .map_err(|()| Error("invalid table path".into()))?
+    };
+    let mut builder = DeltaTableBuilder::from_url(url)
+        .map_err(delta_error)?
+        .with_storage_options(options.clone().into_iter().collect());
+    if let Some(version) = version {
+        builder = builder.with_version(version);
+    }
+    builder.load().await.map_err(delta_error)
+}
+
+async fn read_log(table: &DeltaTable, last_version: u64) -> Result<Vec<LogCommit>, Error> {
+    let store = table.log_store();
+    let mut commits = Vec::new();
+    for version in 0..=last_version {
+        let Some(bytes) = store
+            .read_commit_entry(version)
+            .await
+            .map_err(delta_error)?
+        else {
+            continue;
+        };
+        let actions = parse_commit(&bytes, version)?;
+        commits.push(LogCommit { version, actions });
+    }
+    Ok(commits)
+}
+
+fn parse_commit(bytes: &[u8], version: u64) -> Result<Vec<serde_json::Value>, Error> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| Error(format!("commit {version} is not UTF-8: {e}")))?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            serde_json::from_str(line)
+                .map_err(|e| Error(format!("cannot parse commit {version}: {e}")))
+        })
+        .collect()
 }
 
 fn local_root(path: &Path) -> Result<PathBuf, Error> {

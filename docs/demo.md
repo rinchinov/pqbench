@@ -5,7 +5,8 @@ concurrently and keeps the lake / catalog / schema tree in the report.
 
 The lake walkthrough uses the same `commerce` / `retail` catalog as the
 collections work: `bronze` holds raw tables, `gold` holds the curated ones.
-Each table carries the same `pqbench.remote-source` document as `--source -`.
+Each table carries the same `pqbench.remote-source` document `bytemass` reads
+from a file or stdin.
 The input is [docs/demos/lake.json](demos/lake.json).
 
 Single-file recordings still use the public samples staged under
@@ -18,8 +19,8 @@ Single-file recordings still use the public samples staged under
 ## A lake of tables
 
 ```sh
-pqbench bytemass --collection docs/demos/lake.json --json
-pqbench bytemass --collection docs/demos/lake.json --d3 --output-dir reports
+pqbench bytemass docs/demos/lake.json --json
+pqbench bytemass docs/demos/lake.json --d3 --output-dir reports
 ```
 
 ![pqbench lake CLI walkthrough](images/pqbench-lake.gif)
@@ -49,18 +50,19 @@ The treemap area is each column's compressed bytes per physical row:
 
 ## One Delta snapshot
 
-The `delta` command is feature-gated; build with `--features delta` (the
-published Docker image ships without it):
+`pqbench table` is feature-gated for Delta loads; build with `--features delta`
+(the published Docker image ships without it). A TTY pretty-prints the log; a
+pipe writes the full document for `bytemass`:
 
 ```sh
-pqbench delta ./stackexchange-delta
-pqbench delta ./stackexchange-delta --version 0 --json
-pqbench delta ./stackexchange-delta --d3 > treemap.html
+pqbench table ./stackexchange-delta
+pqbench table ./stackexchange-delta --version 0
+pqbench table ./stackexchange-delta | pqbench bytemass --d3 > treemap.html
 ```
 
 ![pqbench delta CLI walkthrough](images/pqbench-delta-bytemass.gif)
 
-The table-level treemap aggregates the active Parquet files selected by the
+The table-level treemap aggregates the active Parquet files named by the
 Delta transaction log:
 
 ![Stack Exchange Delta byte-mass treemap](images/pqbench-delta-bytemass.png)

@@ -5,7 +5,7 @@ use pqbench::bytemass::batch::{self, Collection, Outcome, Table};
 use crate::bytemass::BytemassArgs;
 use crate::CliError;
 
-pub(super) fn run(input: &str, args: &BytemassArgs) -> Result<(), CliError> {
+pub(super) fn run(collection: Collection<Table>, args: &BytemassArgs) -> Result<(), CliError> {
     if let Some(directory) = &args.output_dir {
         if !args.json && !args.d3 {
             return Err("--output-dir requires --json or --d3".into());
@@ -14,19 +14,6 @@ pub(super) fn run(input: &str, args: &BytemassArgs) -> Result<(), CliError> {
             return Err("--output-dir must name a new directory".into());
         }
     }
-    let reader: Box<dyn std::io::Read> = if input == "-" {
-        Box::new(std::io::stdin().lock())
-    } else {
-        Box::new(std::fs::File::open(input)?)
-    };
-    // Serde errors may quote invalid values, including storage options.
-    let collection: Collection<Table> = serde_json::from_reader(reader).map_err(|e| {
-        format!(
-            "invalid collection document at line {}, column {}",
-            e.line(),
-            e.column()
-        )
-    })?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

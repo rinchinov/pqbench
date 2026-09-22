@@ -28,16 +28,16 @@ jq '{lake, catalog: .catalogs[0].name, schemas: [.catalogs[0].schemas[] |
     {name, tables: [.tables[].name]}]}' docs/demos/lake.json
 sleep 4
 
-prompt "pqbench bytemass --collection docs/demos/lake.json --json"
-run_pqbench bytemass --collection docs/demos/lake.json --json \
+prompt "pqbench bytemass docs/demos/lake.json --json"
+run_pqbench bytemass docs/demos/lake.json --json \
     >.docker-data/pqbench-lake.json
 jq '{kind, lake, catalogs: [.catalogs[] | {name, schemas: [.schemas[] |
     {name, tables: [.tables[] | {name, status}]}]}]}' \
     .docker-data/pqbench-lake.json
 sleep 4
 
-prompt "pqbench bytemass --collection docs/demos/lake.json --d3 > lake.html"
-run_pqbench bytemass --collection docs/demos/lake.json --d3 \
+prompt "pqbench bytemass docs/demos/lake.json --d3 > lake.html"
+run_pqbench bytemass docs/demos/lake.json --d3 \
     >.docker-data/pqbench-lake.html
 wc -c .docker-data/pqbench-lake.html |
     awk '{ print "wrote lake.html (" $1 " bytes)" }'

@@ -69,16 +69,11 @@ curl -s -X POST $UC/temporary-table-credentials -H 'Content-Type: application/js
         AWS_SESSION_TOKEN: .session_token, AWS_REGION: "us-east-1",
         AWS_ENDPOINT: $s3, AWS_ENDPOINT_URL: $s3, AWS_ALLOW_HTTP: "true",
         AWS_VIRTUAL_HOSTED_STYLE_REQUEST: "false"})}' |
-  target/debug/pqbench delta --source -
+  target/debug/pqbench table |
+  target/debug/pqbench bytemass
 ```
 
 ```text
-delta version: 0
-active files: 1
-physical rows: 3
-active parquet bytes: 796
-compressed column bytes: 138
-uncompressed column bytes: 133
 bytemass: part-00000-5eef9a52-f717-4d78-8e62-d7a2a05c707b-c000.snappy.parquet
 column                              bytes/row
 label                                   24.00
@@ -92,15 +87,17 @@ for `--d3 > events-treemap.html` to get a treemap, or drop it and pipe to `jq .`
 to read the document itself.
 
 The document is `{"kind": "pqbench.remote-source", "version": 1, "inputs": [...],
-"env": {...}}`. The producer answers *what to measure*, so pqbench keeps no
-catalog dependency. Storage configuration normally comes from the `AWS_*`
-environment; a producer whose catalog vends expiring credentials puts them in
-`env` instead, which pqbench applies to its own environment before reading. Only
-`AWS_*` names are accepted there, and anything else is a loud error. Both
-endpoint names appear because pqbench's object store reads `AWS_ENDPOINT` while
-delta-rs reads `AWS_ENDPOINT_URL`; against real AWS neither is needed. `inputs`
-is one Delta table for `pqbench delta`, and `pqbench bytemass --source -` takes
-the same document naming Parquet objects directly.
+"env": {...}}`. The producer answers *which table*, `pqbench table` detects
+the format and loads the log, and `pqbench bytemass` measures the files named
+in that table document. pqbench keeps no catalog dependency. Storage
+configuration normally comes from the `AWS_*` environment; a producer whose
+catalog vends expiring credentials puts them in `env` instead, which travels
+on the table document to `bytemass`. Only `AWS_*` names are accepted there,
+and anything else is a loud error. Both endpoint names appear because
+pqbench's object store reads `AWS_ENDPOINT` while delta-rs reads
+`AWS_ENDPOINT_URL`; against real AWS neither is needed. `inputs` is one table
+URI for `pqbench table`. The same kind naming Parquet objects goes straight
+to `pqbench bytemass`.
 
 One caveat before copying this shape onto real infrastructure. Unity Catalog OSS
 mints vended credentials by calling AWS STS `AssumeRole` and cannot send that
@@ -118,7 +115,7 @@ role and return a policy-scoped session.
 
 Databricks Unity Catalog vends genuine STS sessions and its CLI has a command for
 that, so the shape survives the move off the stand. The vending response's `url`
-is the table's storage path, which is all `pqbench delta` needs — it reads the
+is the table's storage path, which is all `pqbench table` needs — it reads the
 log itself, so nothing has to enumerate files:
 
 ```bash
@@ -131,7 +128,7 @@ databricks temporary-table-credentials generate-temporary-table-credentials \
     env: (.aws_temp_credentials | {AWS_ACCESS_KEY_ID: .access_key_id,
       AWS_SECRET_ACCESS_KEY: .secret_access_key,
       AWS_SESSION_TOKEN: .session_token, AWS_REGION: "us-east-1"})}' |
-  pqbench delta --source -
+  pqbench table | pqbench bytemass
 ```
 
 `--table-id` wants the table's UUID, hence the inner `tables get`. `AWS_REGION`

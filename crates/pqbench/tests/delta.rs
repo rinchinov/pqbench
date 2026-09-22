@@ -4,6 +4,7 @@ mod support;
 
 use pqbench::parquet_helpers::{default_metadata_parser, MetadataParser};
 use pqbench::table::delta::{delta, render_json, render_text, DeltaRequest};
+use pqbench::table::{self, LoadRequest, TableFormat};
 use serde_json::json;
 use support::{metadata, remove, write_parquet, Fixture};
 
@@ -43,11 +44,114 @@ async fn collection_resolves_each_snapshot_and_matches_existing_delta_report() {
     );
 }
 
+fn load_request(uri: impl Into<String>, version: Option<u64>) -> LoadRequest {
+    LoadRequest {
+        uri: uri.into(),
+        version,
+        env: Default::default(),
+    }
+}
+
 fn request(table: impl Into<String>, version: Option<u64>) -> DeltaRequest {
     DeltaRequest {
         table: table.into(),
         version,
     }
+}
+
+#[tokio::test]
+async fn detect_names_delta_and_rejects_unknown_and_iceberg() {
+    let fixture = Fixture::new();
+    assert_eq!(
+        table::detect(&fixture.path().to_string_lossy(), &Default::default())
+            .await
+            .unwrap(),
+        TableFormat::Delta
+    );
+    let empty = tempfile::tempdir().unwrap();
+    let error = table::detect(&empty.path().to_string_lossy(), &Default::default())
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("unrecognized table format"), "{error}");
+    std::fs::create_dir(empty.path().join("metadata")).unwrap();
+    std::fs::write(empty.path().join("metadata/version-hint.text"), "1").unwrap();
+    assert_eq!(
+        table::detect(&empty.path().to_string_lossy(), &Default::default())
+            .await
+            .unwrap(),
+        TableFormat::Iceberg
+    );
+    let error = table::load(&load_request(empty.path().to_string_lossy(), None))
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains("iceberg tables are not supported yet"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn load_emits_every_json_commit_and_only_active_files() {
+    let fixture = Fixture::new();
+    let info = table::load(&load_request(fixture.path().to_string_lossy(), None))
+        .await
+        .unwrap();
+    assert_eq!(info.kind, "pqbench.table");
+    assert_eq!(info.version, 1);
+    assert_eq!(info.format, TableFormat::Delta);
+    assert_eq!(info.snapshot_version, 1);
+    assert_eq!(info.partition_columns, ["part"]);
+    assert_eq!(info.log.len(), 2);
+    assert_eq!(info.log[0].version, 0);
+    assert_eq!(info.log[1].version, 1);
+    let v0: String = info.log[0]
+        .actions
+        .iter()
+        .map(|action| action.as_object().unwrap().keys().next().unwrap().as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(
+        v0.contains("protocol") && v0.contains("metaData") && v0.contains("add"),
+        "{v0}"
+    );
+    assert!(info.log[1]
+        .actions
+        .iter()
+        .any(|action| action.get("remove").is_some()));
+    let mut paths: Vec<_> = info.files.iter().map(|file| file.path.as_str()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["part=a/added.parquet", "part=b/kept.parquet"]);
+    assert!(!paths.iter().any(|path| path.contains("old file")));
+    let text = table::render_text(&info);
+    assert!(text.contains("format: delta"));
+    assert!(
+        text.contains("add part=a/old file.parquet")
+            || text.contains("add part=a/old%20file.parquet")
+    );
+    assert!(text.contains("remove"));
+}
+
+#[tokio::test]
+async fn load_then_bytemass_matches_delta_report() {
+    let fixture = Fixture::new();
+    let info = table::load(&load_request(fixture.path().to_string_lossy(), None))
+        .await
+        .unwrap();
+    let rows = pqbench::bytemass::bytemass(&pqbench::bytemass::BytemassRequest {
+        inputs: info.files.iter().map(|file| file.uri.clone()).collect(),
+    })
+    .await
+    .unwrap();
+    let expected = delta(&request(fixture.path().to_string_lossy(), None))
+        .await
+        .unwrap();
+    let summary = pqbench::bytemass::aggregate(&rows).unwrap();
+    assert_eq!(summary.file_count, expected.file_count);
+    assert_eq!(summary.num_rows, expected.physical_rows);
 }
 
 #[tokio::test]
