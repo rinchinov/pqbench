@@ -22,7 +22,7 @@ impl NameFilter {
     }
 
     /// A catalog or `catalog.schema` still worth walking.
-    #[cfg(feature = "unity")]
+    #[cfg(any(feature = "unity", feature = "iceberg"))]
     pub(crate) fn keeps_prefix(&self, name: &str) -> bool {
         let included =
             self.include.is_empty() || self.include.iter().any(|pattern| can_reach(name, pattern));
@@ -85,7 +85,7 @@ fn matches_fqn(name: &str, pattern: &str) -> bool {
         || name.starts_with(&format!("{pattern}/"))
 }
 
-#[cfg(feature = "unity")]
+#[cfg(any(feature = "unity", feature = "iceberg"))]
 fn can_reach(prefix: &str, pattern: &str) -> bool {
     if is_glob(pattern) && glob_matches(pattern, prefix) {
         return true;
@@ -93,7 +93,7 @@ fn can_reach(prefix: &str, pattern: &str) -> bool {
     components_match(prefix, pattern, true)
 }
 
-#[cfg(feature = "unity")]
+#[cfg(any(feature = "unity", feature = "iceberg"))]
 fn prunes_prefix(prefix: &str, pattern: &str) -> bool {
     let prefix_parts = split_fqn(prefix);
     let pattern_parts = split_fqn(pattern);

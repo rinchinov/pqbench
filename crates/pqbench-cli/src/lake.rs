@@ -99,13 +99,8 @@ async fn stream_document(
         Ok(())
     })
     .await?;
-    #[cfg(feature = "unity")]
     if let Some(source) = source {
-        tables += crate::unity::list_tables(&source, filter, |table| write_ref(emit, &table))?;
-    }
-    #[cfg(not(feature = "unity"))]
-    if source.is_some() {
-        return Err("this build cannot list a Unity Catalog; rebuild with --features unity".into());
+        tables += list_catalog(&source, filter, emit)?;
     }
     if let Some(lake) = lake {
         tables += write_lake(&lake, filter, emit)?;
@@ -114,6 +109,52 @@ async fn stream_document(
         return Err("lake listed no tables after include/exclude".into());
     }
     Ok(tables)
+}
+
+#[cfg(any(feature = "unity", feature = "iceberg"))]
+fn list_catalog(
+    source: &crate::document::LakeSource,
+    filter: &NameFilter,
+    emit: &mut Emitter,
+) -> Result<usize, CliError> {
+    let token = source.token.as_deref().filter(|token| !token.is_empty());
+    match crate::catalog::select_protocol(&source.endpoint, token)? {
+        crate::catalog::Protocol::IcebergRest => {
+            #[cfg(feature = "iceberg")]
+            {
+                crate::iceberg::list_tables(source, filter, |table| write_ref(emit, &table))
+            }
+            #[cfg(not(feature = "iceberg"))]
+            {
+                Err(
+                    "this build cannot list an Iceberg REST catalog; rebuild with --features iceberg"
+                        .into(),
+                )
+            }
+        }
+        crate::catalog::Protocol::Unity => {
+            #[cfg(feature = "unity")]
+            {
+                crate::unity::list_tables(source, filter, |table| write_ref(emit, &table))
+            }
+            #[cfg(not(feature = "unity"))]
+            {
+                Err("this build cannot list a Unity Catalog; rebuild with --features unity".into())
+            }
+        }
+    }
+}
+
+#[cfg(not(any(feature = "unity", feature = "iceberg")))]
+fn list_catalog(
+    _source: &crate::document::LakeSource,
+    _filter: &NameFilter,
+    _emit: &mut Emitter,
+) -> Result<usize, CliError> {
+    Err(
+        "this build cannot list a catalog; rebuild with --features unity or --features iceberg"
+            .into(),
+    )
 }
 
 fn write_discovered(

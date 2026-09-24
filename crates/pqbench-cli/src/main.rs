@@ -4,10 +4,14 @@ use clap::{Parser, Subcommand};
 
 mod bench;
 mod bytemass;
+#[cfg(any(feature = "unity", feature = "iceberg"))]
+mod catalog;
 mod compression;
 mod document;
 mod emit;
 mod filter;
+#[cfg(feature = "iceberg")]
+mod iceberg;
 mod lake;
 mod lz;
 mod table;
@@ -65,7 +69,7 @@ Examples:
   producer | pqbench table | pqbench bytemass
 "#)]
     Table(table::TableArgs),
-    /// list the Delta tables in a lake
+    /// list the tables in a lake
     #[command(after_help = r#"Examples:
   pqbench lake ./warehouse
   pqbench lake ./warehouse --include 'sales/*' --exclude 'sales/tmp*'
